@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path"
 	"path/filepath"
@@ -40,12 +41,14 @@ type CurateSliceResponse struct {
 type ServerConfig struct {
 	WorkspaceRoot string
 	MaxTokens     int
+	ReceiptsPath  string
 }
 
 // Server represents the curate-mcp server handler exposing MCP tools.
 type Server struct {
-	cfg    ServerConfig
-	engine *graph.Engine
+	cfg     ServerConfig
+	engine  *graph.Engine
+	emitter *ReceiptEmitter
 }
 
 // NewServer initializes a new MCP Server with the given configuration.
@@ -53,9 +56,14 @@ func NewServer(cfg ServerConfig) *Server {
 	if cfg.MaxTokens <= 0 {
 		cfg.MaxTokens = graph.HardCapTokens
 	}
+	var emitter *ReceiptEmitter
+	if cfg.ReceiptsPath != "" {
+		emitter = NewReceiptEmitter(cfg.ReceiptsPath)
+	}
 	return &Server{
-		cfg:    cfg,
-		engine: graph.NewEngine(),
+		cfg:     cfg,
+		engine:  graph.NewEngine(),
+		emitter: emitter,
 	}
 }
 
@@ -67,6 +75,11 @@ func (s *Server) SetEngine(engine *graph.Engine) {
 // GetEngine returns the underlying graph engine.
 func (s *Server) GetEngine() *graph.Engine {
 	return s.engine
+}
+
+// GetEmitter returns the attached receipt emitter.
+func (s *Server) GetEmitter() *ReceiptEmitter {
+	return s.emitter
 }
 
 // ValidateWorkspacePath enforces defensive security against path traversal attacks.
@@ -239,4 +252,240 @@ func (s *Server) CurateSlice(ctx context.Context, req CurateSliceRequest) (*Cura
 		Entrypoints:  entrypoints,
 		DurationMS:   duration,
 	}, nil
+}
+
+// RPCError represents a structured JSON-RPC protocol error.
+type RPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+func (e *RPCError) Error() string {
+	return e.Message
+}
+
+var (
+	ErrRPCInvalidParams            = &RPCError{Code: -32602, Message: "Invalid params"}
+	ErrRPCReceiptsPathNotConfigured = &RPCError{Code: -32602, Message: "Invalid params: receipts path not configured"}
+	ErrRPCNodeNotFound             = &RPCError{Code: -32602, Message: "Invalid params: node not found"}
+)
+
+// BlastRadiusRequest defines the JSON-RPC input schema for tool get_blast_radius.
+type BlastRadiusRequest struct {
+	NodeName       string `json:"node_name"`
+	Depth          int    `json:"depth,omitempty"`
+	MaxNodes       int    `json:"max_nodes,omitempty"`
+	PersistReceipt *bool  `json:"persist_receipt,omitempty"`
+}
+
+// BlastRadiusResponse defines the JSON-RPC output schema for tool get_blast_radius.
+type BlastRadiusResponse struct {
+	Status            string          `json:"status"`
+	NodeName          string          `json:"node_name"`
+	FilePath          string          `json:"file_path"`
+	InDegree          int             `json:"in_degree"`
+	OutDegree         int             `json:"out_degree"`
+	Criticality       int             `json:"criticality"`
+	Risk              graph.RiskLevel `json:"risk"`
+	FTDEligible       bool            `json:"ftd_eligible"`
+	UpstreamCallers   []string        `json:"upstream_callers"`
+	DownstreamCallees []string        `json:"downstream_callees"`
+	OTelTrace         string          `json:"otel_trace"`
+	ReceiptPersisted  bool            `json:"receipt_persisted"`
+	Truncated         bool            `json:"truncated,omitempty"`
+}
+
+// FindPathRequest defines the JSON-RPC input schema for tool find_path.
+type FindPathRequest struct {
+	NodeA string `json:"node_a"`
+	NodeB string `json:"node_b"`
+}
+
+// FindPathResponse defines the JSON-RPC output schema for tool find_path.
+type FindPathResponse struct {
+	Status    string   `json:"status"`
+	Source    string   `json:"source"`
+	Target    string   `json:"target"`
+	Connected bool     `json:"connected"`
+	Path      []string `json:"path"`
+	Length    int      `json:"length"`
+	Truncated bool     `json:"truncated,omitempty"`
+}
+
+// ArchitectureSummaryResponse defines the JSON-RPC output schema for tool get_architecture_summary.
+type ArchitectureSummaryResponse struct {
+	Status       string                 `json:"status"`
+	TotalFiles   int                    `json:"total_files"`
+	TotalSymbols int                    `json:"total_symbols"`
+	TotalEdges   int                    `json:"total_edges"`
+	EdgesByType  map[string]int         `json:"edges_by_type"`
+	GodNodes     []graph.GodNode        `json:"god_nodes"`
+	Truncated    bool                   `json:"truncated,omitempty"`
+}
+
+// ResolveReceiptsPath resolves the effective receipts file path respecting CLI flag > ENV var precedence.
+func ResolveReceiptsPath(cliFlag string, envVar string) string {
+	if cliFlag != "" {
+		return cliFlag
+	}
+	if envVar != "" {
+		return envVar
+	}
+	return ""
+}
+
+// GetBlastRadius executes the get_blast_radius tool.
+func (s *Server) GetBlastRadius(ctx context.Context, req BlastRadiusRequest) (*BlastRadiusResponse, error) {
+	if req.NodeName == "" {
+		return nil, ErrRPCInvalidParams
+	}
+
+	hasPath := s.emitter != nil && s.emitter.GetReceiptsPath() != ""
+	if !hasPath && req.PersistReceipt != nil && *req.PersistReceipt {
+		return nil, ErrRPCReceiptsPathNotConfigured
+	}
+
+	res, err := s.engine.CalculateBlastRadius(req.NodeName, req.Depth, req.MaxNodes)
+	if err != nil {
+		if errors.Is(err, graph.ErrInvalidParams) {
+			return nil, ErrRPCInvalidParams
+		}
+		if errors.Is(err, graph.ErrNodeNotFound) {
+			return nil, ErrRPCNodeNotFound
+		}
+		return nil, err
+	}
+
+	persist := false
+	if hasPath {
+		if req.PersistReceipt == nil || *req.PersistReceipt {
+			persist = true
+		}
+	}
+
+	if persist {
+		entry := ReceiptEntry{
+			TimestampEpoch:  float64(time.Now().Unix()),
+			TTLSeconds:      900,
+			CodeSymbol:      res.NodeName,
+			CodeFilePath:    res.FilePath,
+			TraceID:         res.TraceID,
+			InDegree:        res.InDegree,
+			OutDegree:       res.OutDegree,
+			IC:              res.Criticality,
+			FTDEligible:     res.FTDEligible,
+			UpstreamCallers: res.UpstreamCallers,
+			AutoEmitted:     true,
+		}
+		if err := s.emitter.EmitReceipt(entry); err != nil {
+			return nil, err
+		}
+	}
+
+	resp := &BlastRadiusResponse{
+		Status:            "ok",
+		NodeName:          res.NodeName,
+		FilePath:          res.FilePath,
+		InDegree:          res.InDegree,
+		OutDegree:         res.OutDegree,
+		Criticality:       res.Criticality,
+		Risk:              res.Risk,
+		FTDEligible:       res.FTDEligible,
+		UpstreamCallers:   res.UpstreamCallers,
+		DownstreamCallees: res.DownstreamCallees,
+		OTelTrace:         res.OTelTrace,
+		ReceiptPersisted:  persist,
+	}
+
+	const maxBytesLimit = 3500
+	rawBytes, err := json.Marshal(resp)
+	if err == nil && len(rawBytes) > maxBytesLimit {
+		resp.Truncated = true
+		for len(rawBytes) > maxBytesLimit && (len(resp.UpstreamCallers) > 0 || len(resp.DownstreamCallees) > 0) {
+			if len(resp.UpstreamCallers) >= len(resp.DownstreamCallees) && len(resp.UpstreamCallers) > 0 {
+				cut := len(resp.UpstreamCallers) / 2
+				if cut == len(resp.UpstreamCallers) {
+					cut--
+				}
+				resp.UpstreamCallers = resp.UpstreamCallers[:cut]
+			} else if len(resp.DownstreamCallees) > 0 {
+				cut := len(resp.DownstreamCallees) / 2
+				if cut == len(resp.DownstreamCallees) {
+					cut--
+				}
+				resp.DownstreamCallees = resp.DownstreamCallees[:cut]
+			}
+			rawBytes, _ = json.Marshal(resp)
+		}
+	}
+
+	return resp, nil
+}
+
+// FindPath executes the find_path tool.
+func (s *Server) FindPath(ctx context.Context, req FindPathRequest) (*FindPathResponse, error) {
+	if req.NodeA == "" || req.NodeB == "" {
+		return nil, ErrRPCInvalidParams
+	}
+
+	res, err := s.engine.FindShortestPath(req.NodeA, req.NodeB)
+	if err != nil {
+		if errors.Is(err, graph.ErrInvalidParams) {
+			return nil, ErrRPCInvalidParams
+		}
+		if errors.Is(err, graph.ErrNodeNotFound) {
+			return nil, ErrRPCNodeNotFound
+		}
+		return nil, err
+	}
+
+	resp := &FindPathResponse{
+		Status:    "ok",
+		Source:    res.Source,
+		Target:    res.Target,
+		Connected: res.Connected,
+		Path:      res.Path,
+		Length:    res.Length,
+	}
+
+	const maxBytesLimit = 3500
+	rawBytes, err := json.Marshal(resp)
+	if err == nil && len(rawBytes) > maxBytesLimit {
+		resp.Truncated = true
+		for len(rawBytes) > maxBytesLimit && len(resp.Path) > 2 {
+			resp.Path = append(resp.Path[:len(resp.Path)-2], resp.Path[len(resp.Path)-1])
+			rawBytes, _ = json.Marshal(resp)
+		}
+	}
+
+	return resp, nil
+}
+
+// GetArchitectureSummary executes the get_architecture_summary tool.
+func (s *Server) GetArchitectureSummary(ctx context.Context) (*ArchitectureSummaryResponse, error) {
+	res, err := s.engine.GetArchitectureSummary()
+	if err != nil {
+		return nil, err
+	}
+
+	resp := &ArchitectureSummaryResponse{
+		Status:       "ok",
+		TotalFiles:   res.TotalFiles,
+		TotalSymbols: res.TotalSymbols,
+		TotalEdges:   res.TotalEdges,
+		EdgesByType:  res.EdgesByType,
+		GodNodes:     res.GodNodes,
+	}
+
+	const maxBytesLimit = 3500
+	rawBytes, err := json.Marshal(resp)
+	if err == nil && len(rawBytes) > maxBytesLimit {
+		resp.Truncated = true
+		for len(rawBytes) > maxBytesLimit && len(resp.GodNodes) > 0 {
+			resp.GodNodes = resp.GodNodes[:len(resp.GodNodes)-1]
+			rawBytes, _ = json.Marshal(resp)
+		}
+	}
+
+	return resp, nil
 }

@@ -151,6 +151,33 @@ Extracts a focused AST sub-graph relevant to a specified task or user intent.
 - `max_files` *(integer, optional)*: Maximum number of primary files to retrieve (default: `5`).
 - `workspace` *(string, optional)*: Path to the workspace (defaults to configured root).
 
+---
+
+### `get_blast_radius`
+Calculates upstream callers $P(u)$, downstream callees $S(u)$, and the Criticality Index ($I_c$) for a given symbol or file before applying changes.
+
+**Parameters:**
+- `node_name` *(string, required)*: Target symbol or file identifier (e.g., `"pkg/graph/engine.go"` or `"NewEngine"`).
+- `depth` *(integer, optional)*: BFS traversal depth limit (default: `2`, max: `5`).
+- `max_nodes` *(integer, optional)*: Maximum number of nodes to extract (default: `50`, max: `200`).
+- `persist_receipt` *(boolean, optional)*: Explicitly toggle OTel receipt emission to disk.
+
+---
+
+### `find_path`
+Discovers the shortest directed dependency path between two symbols or files via functional calls and imports.
+
+**Parameters:**
+- `node_a` *(string, required)*: Origin symbol or file identifier.
+- `node_b` *(string, required)*: Destination symbol or file identifier.
+
+---
+
+### `get_architecture_summary`
+Provides instant topological cardinality metrics and ranks the Top 10 critical *God Nodes* by functional degree.
+
+**Parameters:** None.
+
 **Output:**
 ```json
 {

@@ -21,8 +21,12 @@ import (
 )
 
 const (
-	Version   = "1.0.0"
-	ToolName  = "curate_slice"
+	Version                    = "1.1.0"
+	ToolName                   = "curate_slice"
+	ToolCurateSlice            = "curate_slice"
+	ToolGetBlastRadius         = "get_blast_radius"
+	ToolFindPath               = "find_path"
+	ToolGetArchitectureSummary = "get_architecture_summary"
 )
 
 // JSON-RPC basic structures for MCP stdio protocol
@@ -47,14 +51,16 @@ type rpcError struct {
 
 func main() {
 	var (
-		workspaceFlag string
-		maxTokensFlag int
-		versionFlag   bool
+		workspaceFlag    string
+		maxTokensFlag    int
+		receiptsPathFlag string
+		versionFlag      bool
 	)
 
 	flag.StringVar(&workspaceFlag, "workspace", "", "Path to codebase workspace root")
 	flag.StringVar(&workspaceFlag, "w", "", "Path to codebase workspace root (shorthand)")
 	flag.IntVar(&maxTokensFlag, "max-tokens", graph.HardCapTokens, "Hard token budget limit for curated slices")
+	flag.StringVar(&receiptsPathFlag, "receipts-path", "", "Path to OTel receipts JSON file (e.g. runtime/state/blast_radius_receipts.json)")
 	flag.BoolVar(&versionFlag, "version", false, "Print curate-mcp version")
 	flag.Parse()
 
@@ -87,9 +93,12 @@ func main() {
 	engine := graph.NewEngine()
 	dispatcher := parser.NewDispatcher()
 
+	receiptsPath := mcp.ResolveReceiptsPath(receiptsPathFlag, os.Getenv("CURATE_RECEIPTS_PATH"))
+
 	serverConfig := mcp.ServerConfig{
 		WorkspaceRoot: workspace,
 		MaxTokens:     maxTokensFlag,
+		ReceiptsPath:  receiptsPath,
 	}
 	server := mcp.NewServer(serverConfig)
 	server.SetEngine(engine)
@@ -328,7 +337,7 @@ func handleRPC(ctx context.Context, server *mcp.Server, req jsonrpcRequest, enc 
 	case "tools/list":
 		tools := []map[string]interface{}{
 			{
-				"name":        ToolName,
+				"name":        ToolCurateSlice,
 				"description": "Performs fast, in-memory structural AST curation and returns a token-bounded sub-graph slice for an intent query.",
 				"inputSchema": map[string]interface{}{
 					"type": "object",
@@ -347,6 +356,58 @@ func handleRPC(ctx context.Context, server *mcp.Server, req jsonrpcRequest, enc 
 						},
 					},
 					"required": []string{"intent"},
+				},
+			},
+			{
+				"name":        ToolGetBlastRadius,
+				"description": "Calculates blast radius, upstream callers, downstream callees, and criticality Ic for a code symbol in RAM.",
+				"inputSchema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"node_name": map[string]interface{}{
+							"type":        "string",
+							"description": "Identifier of the code symbol (e.g. 'pkg/auth/auth.go:AuthService')",
+						},
+						"depth": map[string]interface{}{
+							"type":        "integer",
+							"description": "BFS traversal depth (1-5, default 2)",
+						},
+						"max_nodes": map[string]interface{}{
+							"type":        "integer",
+							"description": "Maximum number of nodes to traverse (default 50, max 200)",
+						},
+						"persist_receipt": map[string]interface{}{
+							"type":        "boolean",
+							"description": "Whether to persist an OTel receipt to disk (requires receipts path configured)",
+						},
+					},
+					"required": []string{"node_name"},
+				},
+			},
+			{
+				"name":        ToolFindPath,
+				"description": "Finds the shortest directed functional path (calls, imports) between two symbols in RAM.",
+				"inputSchema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"node_a": map[string]interface{}{
+							"type":        "string",
+							"description": "Source node identifier",
+						},
+						"node_b": map[string]interface{}{
+							"type":        "string",
+							"description": "Target node identifier",
+						},
+					},
+					"required": []string{"node_a", "node_b"},
+				},
+			},
+			{
+				"name":        ToolGetArchitectureSummary,
+				"description": "Provides macro architecture metrics and Top 10 God Nodes (high-centrality functional symbols).",
+				"inputSchema": map[string]interface{}{
+					"type":       "object",
+					"properties": map[string]interface{}{},
 				},
 			},
 		}
@@ -375,7 +436,174 @@ func handleRPC(ctx context.Context, server *mcp.Server, req jsonrpcRequest, enc 
 			return
 		}
 
-		if callParams.Name != ToolName {
+		switch callParams.Name {
+		case ToolCurateSlice:
+			intent, _ := callParams.Arguments["intent"].(string)
+			maxFiles := 10
+			if mf, ok := callParams.Arguments["max_files"].(float64); ok {
+				maxFiles = int(mf)
+			}
+			ws, _ := callParams.Arguments["workspace"].(string)
+
+			sliceReq := mcp.CurateSliceRequest{
+				Intent:    intent,
+				MaxFiles:  maxFiles,
+				Workspace: ws,
+			}
+
+			sliceRes, err := server.CurateSlice(ctx, sliceReq)
+			if err != nil {
+				_ = enc.Encode(jsonrpcResponse{
+					JSONRPC: "2.0",
+					ID:      req.ID,
+					Error: &rpcError{
+						Code:    -32000,
+						Message: err.Error(),
+					},
+				})
+				return
+			}
+
+			jsonBytes, _ := json.MarshalIndent(sliceRes, "", "  ")
+			_ = enc.Encode(jsonrpcResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result: map[string]interface{}{
+					"content": []map[string]interface{}{
+						{
+							"type": "text",
+							"text": string(jsonBytes),
+						},
+					},
+				},
+			})
+
+		case ToolGetBlastRadius:
+			nodeName, _ := callParams.Arguments["node_name"].(string)
+			depth := 0
+			if d, ok := callParams.Arguments["depth"].(float64); ok {
+				depth = int(d)
+			}
+			maxNodes := 0
+			if mn, ok := callParams.Arguments["max_nodes"].(float64); ok {
+				maxNodes = int(mn)
+			}
+			var persistReceipt *bool
+			if pr, ok := callParams.Arguments["persist_receipt"].(bool); ok {
+				persistReceipt = &pr
+			}
+
+			brReq := mcp.BlastRadiusRequest{
+				NodeName:       nodeName,
+				Depth:          depth,
+				MaxNodes:       maxNodes,
+				PersistReceipt: persistReceipt,
+			}
+
+			brRes, err := server.GetBlastRadius(ctx, brReq)
+			if err != nil {
+				code := -32000
+				if rpcErr, ok := err.(*mcp.RPCError); ok {
+					code = rpcErr.Code
+				}
+				_ = enc.Encode(jsonrpcResponse{
+					JSONRPC: "2.0",
+					ID:      req.ID,
+					Error: &rpcError{
+						Code:    code,
+						Message: err.Error(),
+					},
+				})
+				return
+			}
+
+			jsonBytes, _ := json.MarshalIndent(brRes, "", "  ")
+			_ = enc.Encode(jsonrpcResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result: map[string]interface{}{
+					"content": []map[string]interface{}{
+						{
+							"type": "text",
+							"text": string(jsonBytes),
+						},
+					},
+				},
+			})
+
+		case ToolFindPath:
+			nodeA, _ := callParams.Arguments["node_a"].(string)
+			nodeB, _ := callParams.Arguments["node_b"].(string)
+
+			fpReq := mcp.FindPathRequest{
+				NodeA: nodeA,
+				NodeB: nodeB,
+			}
+
+			fpRes, err := server.FindPath(ctx, fpReq)
+			if err != nil {
+				code := -32000
+				if rpcErr, ok := err.(*mcp.RPCError); ok {
+					code = rpcErr.Code
+				}
+				_ = enc.Encode(jsonrpcResponse{
+					JSONRPC: "2.0",
+					ID:      req.ID,
+					Error: &rpcError{
+						Code:    code,
+						Message: err.Error(),
+					},
+				})
+				return
+			}
+
+			jsonBytes, _ := json.MarshalIndent(fpRes, "", "  ")
+			_ = enc.Encode(jsonrpcResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result: map[string]interface{}{
+					"content": []map[string]interface{}{
+						{
+							"type": "text",
+							"text": string(jsonBytes),
+						},
+					},
+				},
+			})
+
+		case ToolGetArchitectureSummary:
+			sumRes, err := server.GetArchitectureSummary(ctx)
+			if err != nil {
+				code := -32000
+				if rpcErr, ok := err.(*mcp.RPCError); ok {
+					code = rpcErr.Code
+				}
+				_ = enc.Encode(jsonrpcResponse{
+					JSONRPC: "2.0",
+					ID:      req.ID,
+					Error: &rpcError{
+						Code:    code,
+						Message: err.Error(),
+					},
+				})
+				return
+			}
+
+			jsonBytes, _ := json.MarshalIndent(sumRes, "", "  ")
+			_ = enc.Encode(jsonrpcResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result: map[string]interface{}{
+					"content": []map[string]interface{}{
+						{
+							"type": "text",
+							"text": string(jsonBytes),
+						},
+					},
+				},
+			})
+
+		default:
 			_ = enc.Encode(jsonrpcResponse{
 				JSONRPC: "2.0",
 				ID:      req.ID,
@@ -386,46 +614,6 @@ func handleRPC(ctx context.Context, server *mcp.Server, req jsonrpcRequest, enc 
 			})
 			return
 		}
-
-		intent, _ := callParams.Arguments["intent"].(string)
-		maxFiles := 10
-		if mf, ok := callParams.Arguments["max_files"].(float64); ok {
-			maxFiles = int(mf)
-		}
-		ws, _ := callParams.Arguments["workspace"].(string)
-
-		sliceReq := mcp.CurateSliceRequest{
-			Intent:    intent,
-			MaxFiles:  maxFiles,
-			Workspace: ws,
-		}
-
-		sliceRes, err := server.CurateSlice(ctx, sliceReq)
-		if err != nil {
-			_ = enc.Encode(jsonrpcResponse{
-				JSONRPC: "2.0",
-				ID:      req.ID,
-				Error: &rpcError{
-					Code:    -32000,
-					Message: err.Error(),
-				},
-			})
-			return
-		}
-
-		jsonBytes, _ := json.MarshalIndent(sliceRes, "", "  ")
-		_ = enc.Encode(jsonrpcResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result: map[string]interface{}{
-				"content": []map[string]interface{}{
-					{
-						"type": "text",
-						"text": string(jsonBytes),
-					},
-				},
-			},
-		})
 
 	default:
 		if req.ID != nil {
