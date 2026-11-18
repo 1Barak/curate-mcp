@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"curate-mcp/pkg/graph"
+	"github.com/1Barak/curate-mcp/pkg/graph"
 )
 
 // RPCErrorPayload represents the wire JSON-RPC 2.0 error schema required by RF-4.

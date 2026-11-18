@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"curate-mcp/pkg/graph"
+	"github.com/1Barak/curate-mcp/pkg/graph"
 )
 
 // TestReceiptsPathResolution_Precedence validates CLI flag > ENV var precedence

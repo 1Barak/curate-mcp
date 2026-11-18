@@ -1,4 +1,4 @@
-module curate-mcp
+module github.com/1Barak/curate-mcp
 
 go 1.26.3
 

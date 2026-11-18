@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode"
 
-	"curate-mcp/pkg/graph"
+	"github.com/1Barak/curate-mcp/pkg/graph"
 )
 
 // Security errors for path validation.

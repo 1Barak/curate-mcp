@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"curate-mcp/pkg/graph"
+	"github.com/1Barak/curate-mcp/pkg/graph"
 )
 
 // buildArchitectureFixtureEngine creates an in-memory graph with realistic files,

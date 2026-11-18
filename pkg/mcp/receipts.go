@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"curate-mcp/pkg/graph"
+	"github.com/1Barak/curate-mcp/pkg/graph"
 )
 
 var (

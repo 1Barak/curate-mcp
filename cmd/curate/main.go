@@ -18,10 +18,10 @@ import (
 	"syscall"
 	"time"
 
-	"curate-mcp/pkg/graph"
-	"curate-mcp/pkg/mcp"
-	"curate-mcp/pkg/parser"
-	"curate-mcp/pkg/watcher"
+	"github.com/1Barak/curate-mcp/pkg/graph"
+	"github.com/1Barak/curate-mcp/pkg/mcp"
+	"github.com/1Barak/curate-mcp/pkg/parser"
+	"github.com/1Barak/curate-mcp/pkg/watcher"
 )
 
 var jsonBufferPool = sync.Pool{
