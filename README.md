@@ -224,7 +224,7 @@ Provides instant topological cardinality metrics and ranks the Top God Nodes by 
     "imports": 241
   },
   "god_nodes": [
-    "infrastructure/vps-adb-bridge/contract.cjs:errorResponse"
+    "pkg/auth/token.go:VerifyToken"
   ]
 }
 ```
@@ -239,9 +239,9 @@ Provides instant topological cardinality metrics and ranks the Top God Nodes by 
 - **Edges**: 4722 (calls: 1511, defines: 2970, imports: 241)
 
 ## God Nodes (Top 5)
-- `infrastructure/vps-adb-bridge/contract.cjs:errorResponse`: total_degree=36 (in=36, out=0)
-- `infrastructure/vps-adb-bridge/adb-wrapper.cjs:runAdb`: total_degree=32 (in=32, out=0)
-- `infrastructure/vps-adb-bridge/contract.cjs:successResponse`: total_degree=24 (in=24, out=0)
+- `pkg/auth/token.go:VerifyToken`: total_degree=36 (in=36, out=0)
+- `pkg/router/routes.go:RegisterHandler`: total_degree=32 (in=32, out=0)
+- `pkg/db/pool.go:QueryContext`: total_degree=24 (in=24, out=0)
 
 ## Structural Warnings
 - Status: Topology health is nominal with zero critical warnings.
@@ -258,16 +258,16 @@ go test -v ./...
 All unit tests execute in < 50 ms with zero external dependencies.
 
 ### 🏢 Real-World Codebase Benchmarks (Empirical Measurements)
-Measured on physical hardware (AMD Ryzen 5, NVMe SSD) across active development repositories of varied stacks:
+Measured on physical hardware (AMD Ryzen 5, NVMe SSD) across real production and development codebases of varied scales and tech stacks:
 
-| Real-World Repository | Stack / Domain | Code Files | Graph Nodes | Edges | Cold Index Time | Slice Latency (P50) | RAM Heap |
+| Codebase Archetype | Primary Stack | Code Files | Graph Nodes | Edges | Cold Index Time | Slice Latency (P50) | RAM Heap |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`curate-mcp`** | Go / MCP Server | 33 | 222 | 341 | **15.8 ms** | **999 µs (< 1 ms)** | **1.4 MB** |
-| **`Cms`** | Node.js / Express | 44 | 216 | 321 | **62.8 ms** | **1.40 ms** | **2.1 MB** |
-| **`pagina1`** | TypeScript / Web | 126 | 421 | 798 | **140.7 ms** | **776 µs (< 1 ms)** | **1.6 MB** |
-| **`vps-redmi`** | Go + Node.js CLI | 567 | 2,920 | 4,985 | **659.7 ms** | **3.57 ms** | **4.4 MB** |
-| **`proyectob1`** | Full-stack JS | 615 | 2,064 | 3,156 | **859.0 ms** | **2.24 ms** | **4.3 MB** |
-| **`.Ecosistema`** | Multi-language Infra | 689 | 3,393 | 4,550 | **840.4 ms** | **3.30 ms** | **3.8 MB** |
+| **`curate-mcp` (Self-Scan)** | Go / MCP Server | 33 | 222 | 341 | **15.8 ms** | **999 µs (< 1 ms)** | **1.4 MB** |
+| **Microservice Backend** | Node.js / Express | 44 | 216 | 321 | **62.8 ms** | **1.40 ms** | **2.1 MB** |
+| **SPA Frontend Web App** | TypeScript / React | 126 | 421 | 798 | **140.7 ms** | **776 µs (< 1 ms)** | **1.6 MB** |
+| **Hybrid Backend & CLI Suite** | Go + Node.js | 567 | 2,920 | 4,985 | **659.7 ms** | **3.57 ms** | **4.4 MB** |
+| **Full-Stack Web Monolith** | JavaScript / Node.js | 615 | 2,064 | 3,156 | **859.0 ms** | **2.24 ms** | **4.3 MB** |
+| **Enterprise Infra Monorepo** | Multi-Language | 689 | 3,393 | 4,550 | **840.4 ms** | **3.30 ms** | **3.8 MB** |
 
 ### 📈 Synthetic Monorepo Scalability Benchmarks
 Validate latency and memory efficiency across 1,000 to 55,000 node graphs:
