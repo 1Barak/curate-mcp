@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -11,6 +12,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,6 +23,28 @@ import (
 	"curate-mcp/pkg/parser"
 	"curate-mcp/pkg/watcher"
 )
+
+var jsonBufferPool = sync.Pool{
+	New: func() interface{} {
+		return bytes.NewBuffer(make([]byte, 0, 4096))
+	},
+}
+
+func marshalIndentWithPool(v interface{}) ([]byte, error) {
+	buf := jsonBufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer jsonBufferPool.Put(buf)
+
+	enc := json.NewEncoder(buf)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	b := bytes.TrimRight(buf.Bytes(), "\n")
+	res := make([]byte, len(b))
+	copy(res, b)
+	return res, nil
+}
 
 const (
 	Version                    = "1.1.0"
@@ -45,11 +71,15 @@ type jsonrpcResponse struct {
 }
 
 type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code    int         `json:"code"`
+	Message string      `json:"message"`
+	Data    interface{} `json:"data,omitempty"`
 }
 
 func main() {
+	// RF-6: Configure RAM cap to 200 MiB
+	debug.SetMemoryLimit(200 << 20)
+
 	var (
 		workspaceFlag    string
 		maxTokensFlag    int
@@ -144,8 +174,16 @@ func main() {
 		}()
 	}
 
+	// RF-6: Memory Autonomy & Idle Purging (60s default timeout)
+	idleWatcher := mcp.NewIdleWatcher(60*time.Second, func() {
+		runtime.GC()
+		debug.FreeOSMemory()
+	})
+	idleWatcher.Start(ctx)
+	defer idleWatcher.Stop()
+
 	// Run MCP JSON-RPC loop over stdio
-	runStdioLoop(ctx, server, os.Stdin, os.Stdout, logger)
+	runStdioLoop(ctx, server, idleWatcher, os.Stdin, os.Stdout, logger)
 }
 
 func initialIndex(root string, engine *graph.Engine, dispatcher *parser.Dispatcher, logger *log.Logger) {
@@ -198,12 +236,17 @@ func initialIndex(root string, engine *graph.Engine, dispatcher *parser.Dispatch
 		// Add Symbol Nodes
 		for _, sym := range res.Symbols {
 			symID := fmt.Sprintf("%s:%s", relPath, sym.Name)
+			symCalls := sym.Calls
+			if len(symCalls) == 0 && len(res.Symbols) == 1 && len(res.Calls) > 0 {
+				symCalls = res.Calls
+			}
 			symNode := graph.Node{
 				ID:       symID,
 				Label:    sym.Name,
 				FilePath: relPath,
 				Type:     graph.NodeSymbol,
 				Imports:  res.Imports,
+				Calls:    symCalls,
 			}
 			_ = engine.AddNode(symNode)
 
@@ -218,6 +261,11 @@ func initialIndex(root string, engine *graph.Engine, dispatcher *parser.Dispatch
 		indexedCount++
 		return nil
 	})
+
+	// Phase 2: Resolve cross-module functional edges (EdgeImports and EdgeCalls) in RAM
+	if err := engine.ResolveCrossModuleEdges(); err != nil {
+		logger.Printf("Warning: failed to resolve cross-module edges during initial index: %v", err)
+	}
 
 	logger.Printf("Initial index completed in %v: %d files indexed, %d graph nodes, %d edges",
 		time.Since(startTime), indexedCount, engine.NodeCount(), engine.EdgeCount())
@@ -256,12 +304,17 @@ func handleFileChange(ev watcher.FileEvent, root string, engine *graph.Engine, d
 
 	for _, sym := range res.Symbols {
 		symID := fmt.Sprintf("%s:%s", relPath, sym.Name)
+		symCalls := sym.Calls
+		if len(symCalls) == 0 && len(res.Symbols) == 1 && len(res.Calls) > 0 {
+			symCalls = res.Calls
+		}
 		symNode := graph.Node{
 			ID:       symID,
 			Label:    sym.Name,
 			FilePath: relPath,
 			Type:     graph.NodeSymbol,
 			Imports:  res.Imports,
+			Calls:    symCalls,
 		}
 		_ = engine.AddNode(symNode)
 		_ = engine.AddEdge(graph.Edge{
@@ -270,10 +323,16 @@ func handleFileChange(ev watcher.FileEvent, root string, engine *graph.Engine, d
 			Type: graph.EdgeDefines,
 		})
 	}
+
+	// Update Phase 2 cross-module functional edges
+	if err := engine.ResolveCrossModuleEdges(); err != nil {
+		logger.Printf("Warning: failed to resolve cross-module edges on file change: %v", err)
+	}
+
 	logger.Printf("Updated graph for %s (%d symbols extracted)", relPath, len(res.Symbols))
 }
 
-func runStdioLoop(ctx context.Context, server *mcp.Server, r io.Reader, w io.Writer, logger *log.Logger) {
+func runStdioLoop(ctx context.Context, server *mcp.Server, idleWatcher *mcp.IdleWatcher, r io.Reader, w io.Writer, logger *log.Logger) {
 	scanner := bufio.NewScanner(r)
 	encoder := json.NewEncoder(w)
 
@@ -287,6 +346,10 @@ func runStdioLoop(ctx context.Context, server *mcp.Server, r io.Reader, w io.Wri
 		line := scanner.Bytes()
 		if len(line) == 0 {
 			continue
+		}
+
+		if idleWatcher != nil {
+			idleWatcher.RecordActivity()
 		}
 
 		var req jsonrpcRequest
@@ -406,8 +469,14 @@ func handleRPC(ctx context.Context, server *mcp.Server, req jsonrpcRequest, enc 
 				"name":        ToolGetArchitectureSummary,
 				"description": "Provides macro architecture metrics and Top 10 God Nodes (high-centrality functional symbols).",
 				"inputSchema": map[string]interface{}{
-					"type":       "object",
-					"properties": map[string]interface{}{},
+					"type": "object",
+					"properties": map[string]interface{}{
+						"format": map[string]interface{}{
+							"type":        "string",
+							"enum":        []string{"json", "markdown"},
+							"description": "Output format: 'json' (default, ultralight <= 250B) or 'markdown' (formatted report <= 4KB)",
+						},
+					},
 				},
 			},
 		}
@@ -464,7 +533,7 @@ func handleRPC(ctx context.Context, server *mcp.Server, req jsonrpcRequest, enc 
 				return
 			}
 
-			jsonBytes, _ := json.MarshalIndent(sliceRes, "", "  ")
+			jsonBytes, _ := marshalIndentWithPool(sliceRes)
 			_ = enc.Encode(jsonrpcResponse{
 				JSONRPC: "2.0",
 				ID:      req.ID,
@@ -503,8 +572,10 @@ func handleRPC(ctx context.Context, server *mcp.Server, req jsonrpcRequest, enc 
 			brRes, err := server.GetBlastRadius(ctx, brReq)
 			if err != nil {
 				code := -32000
+				var data interface{}
 				if rpcErr, ok := err.(*mcp.RPCError); ok {
 					code = rpcErr.Code
+					data = rpcErr.Data
 				}
 				_ = enc.Encode(jsonrpcResponse{
 					JSONRPC: "2.0",
@@ -512,12 +583,13 @@ func handleRPC(ctx context.Context, server *mcp.Server, req jsonrpcRequest, enc 
 					Error: &rpcError{
 						Code:    code,
 						Message: err.Error(),
+						Data:    data,
 					},
 				})
 				return
 			}
 
-			jsonBytes, _ := json.MarshalIndent(brRes, "", "  ")
+			jsonBytes, _ := marshalIndentWithPool(brRes)
 			_ = enc.Encode(jsonrpcResponse{
 				JSONRPC: "2.0",
 				ID:      req.ID,
@@ -543,8 +615,10 @@ func handleRPC(ctx context.Context, server *mcp.Server, req jsonrpcRequest, enc 
 			fpRes, err := server.FindPath(ctx, fpReq)
 			if err != nil {
 				code := -32000
+				var data interface{}
 				if rpcErr, ok := err.(*mcp.RPCError); ok {
 					code = rpcErr.Code
+					data = rpcErr.Data
 				}
 				_ = enc.Encode(jsonrpcResponse{
 					JSONRPC: "2.0",
@@ -552,12 +626,13 @@ func handleRPC(ctx context.Context, server *mcp.Server, req jsonrpcRequest, enc 
 					Error: &rpcError{
 						Code:    code,
 						Message: err.Error(),
+						Data:    data,
 					},
 				})
 				return
 			}
 
-			jsonBytes, _ := json.MarshalIndent(fpRes, "", "  ")
+			jsonBytes, _ := marshalIndentWithPool(fpRes)
 			_ = enc.Encode(jsonrpcResponse{
 				JSONRPC: "2.0",
 				ID:      req.ID,
@@ -572,11 +647,16 @@ func handleRPC(ctx context.Context, server *mcp.Server, req jsonrpcRequest, enc 
 			})
 
 		case ToolGetArchitectureSummary:
-			sumRes, err := server.GetArchitectureSummary(ctx)
+			format, _ := callParams.Arguments["format"].(string)
+			sumRes, err := server.GetArchitectureSummaryFormatted(ctx, mcp.ArchitectureSummaryRequest{
+				Format: format,
+			})
 			if err != nil {
 				code := -32000
+				var data interface{}
 				if rpcErr, ok := err.(*mcp.RPCError); ok {
 					code = rpcErr.Code
+					data = rpcErr.Data
 				}
 				_ = enc.Encode(jsonrpcResponse{
 					JSONRPC: "2.0",
@@ -584,12 +664,17 @@ func handleRPC(ctx context.Context, server *mcp.Server, req jsonrpcRequest, enc 
 					Error: &rpcError{
 						Code:    code,
 						Message: err.Error(),
+						Data:    data,
 					},
 				})
 				return
 			}
 
-			jsonBytes, _ := json.MarshalIndent(sumRes, "", "  ")
+			outputContent := sumRes.Raw
+			if sumRes.Format == "markdown" && sumRes.Markdown != "" {
+				outputContent = sumRes.Markdown
+			}
+
 			_ = enc.Encode(jsonrpcResponse{
 				JSONRPC: "2.0",
 				ID:      req.ID,
@@ -597,7 +682,7 @@ func handleRPC(ctx context.Context, server *mcp.Server, req jsonrpcRequest, enc 
 					"content": []map[string]interface{}{
 						{
 							"type": "text",
-							"text": string(jsonBytes),
+							"text": outputContent,
 						},
 					},
 				},

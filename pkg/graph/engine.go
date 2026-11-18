@@ -28,6 +28,7 @@ type Node struct {
 	FilePath string   `json:"file_path"`
 	Type     NodeType `json:"type"`
 	Imports  []string `json:"imports,omitempty"`
+	Calls    []string `json:"calls,omitempty"`
 }
 
 // Edge represents a directed connection between two nodes.
@@ -76,6 +77,15 @@ func (e *Engine) AddEdge(edge Edge) error {
 		e.predecessors[edge.To] = append(e.predecessors[edge.To], edge.From)
 	}
 	return nil
+}
+
+// HasEdge checks if a directed edge of edgeType exists from 'from' to 'to'.
+func (e *Engine) HasEdge(from, to string, edgeType EdgeType) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	edgeKey := from + "->" + to + ":" + string(edgeType)
+	_, exists := e.edges[edgeKey]
+	return exists
 }
 
 // GetNode retrieves a node by its identifier.

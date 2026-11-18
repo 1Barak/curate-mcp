@@ -34,6 +34,7 @@ type Symbol struct {
 	Name      string     `json:"name"`
 	Kind      SymbolKind `json:"kind"`
 	StartLine int        `json:"start_line"`
+	Calls     []string   `json:"calls,omitempty"`
 }
 
 // ParseResult contains the extracted AST symbols, imports, and calls for a file.
@@ -133,6 +134,24 @@ func (d *Dispatcher) Parse(filePath string, content []byte) (*ParseResult, error
 }
 
 // --- Go parser using native go/parser standard library ---
+var goBuiltins = map[string]bool{
+	"append":  true,
+	"cap":     true,
+	"close":   true,
+	"complex": true,
+	"copy":    true,
+	"delete":  true,
+	"imag":    true,
+	"len":     true,
+	"make":    true,
+	"new":     true,
+	"panic":   true,
+	"print":   true,
+	"println": true,
+	"real":    true,
+	"recover": true,
+}
+
 func parseGo(filePath string, content []byte, res *ParseResult) (*ParseResult, error) {
 	fset := gotoken.NewFileSet()
 	f, err := goparser.ParseFile(fset, filePath, content, goparser.AllErrors)
@@ -144,6 +163,8 @@ func parseGo(filePath string, content []byte, res *ParseResult) (*ParseResult, e
 		path := strings.Trim(imp.Path.Value, `"`)
 		res.Imports = append(res.Imports, path)
 	}
+
+	fileCallSet := make(map[string]bool)
 
 	for _, decl := range f.Decls {
 		switch d := decl.(type) {
@@ -173,10 +194,37 @@ func parseGo(filePath string, content []byte, res *ParseResult) (*ParseResult, e
 			if d.Recv != nil && len(d.Recv.List) > 0 {
 				kind = KindMethod
 			}
+
+			var symCalls []string
+			symCallSet := make(map[string]bool)
+			if d.Body != nil {
+				goast.Inspect(d.Body, func(n goast.Node) bool {
+					if call, ok := n.(*goast.CallExpr); ok {
+						var callName string
+						switch fun := call.Fun.(type) {
+						case *goast.Ident:
+							callName = fun.Name
+						case *goast.SelectorExpr:
+							callName = fun.Sel.Name
+						}
+						if callName != "" && !goBuiltins[callName] && !symCallSet[callName] {
+							symCallSet[callName] = true
+							symCalls = append(symCalls, callName)
+							if !fileCallSet[callName] {
+								fileCallSet[callName] = true
+								res.Calls = append(res.Calls, callName)
+							}
+						}
+					}
+					return true
+				})
+			}
+
 			res.Symbols = append(res.Symbols, Symbol{
 				Name:      d.Name.Name,
 				Kind:      kind,
 				StartLine: line,
+				Calls:     symCalls,
 			})
 		}
 	}
@@ -185,19 +233,32 @@ func parseGo(filePath string, content []byte, res *ParseResult) (*ParseResult, e
 
 // --- Python parser ---
 var (
-	pyImportRe  = regexp.MustCompile(`^\s*import\s+([a-zA-Z0-9_.]+)`)
-	pyFromRe    = regexp.MustCompile(`^\s*from\s+([a-zA-Z0-9_.]+)\s+import`)
-	pyClassRe   = regexp.MustCompile(`^\s*class\s+([a-zA-Z0-9_]+)`)
-	pyDefRe     = regexp.MustCompile(`^(\s*)def\s+([a-zA-Z0-9_]+)`)
+	pyImportRe = regexp.MustCompile(`^\s*import\s+([a-zA-Z0-9_.]+)`)
+	pyFromRe   = regexp.MustCompile(`^\s*from\s+([a-zA-Z0-9_.]+)\s+import`)
+	pyClassRe  = regexp.MustCompile(`^\s*class\s+([a-zA-Z0-9_]+)`)
+	pyDefRe    = regexp.MustCompile(`^(\s*)def\s+([a-zA-Z0-9_]+)`)
+	pyCallRe   = regexp.MustCompile(`(?:\b|[.])([a-zA-Z_][a-zA-Z0-9_]*)\s*\(`)
 )
+
+var pyKeywords = map[string]bool{
+	"def": true, "class": true, "if": true, "elif": true, "else": true,
+	"while": true, "for": true, "try": true, "except": true, "finally": true,
+	"with": true, "return": true, "yield": true, "pass": true, "lambda": true,
+	"print": true, "len": true, "range": true, "str": true, "int": true,
+	"super": true, "isinstance": true, "type": true, "list": true, "dict": true,
+	"set": true, "bool": true,
+}
 
 func parsePython(content []byte, res *ParseResult) (*ParseResult, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(content))
 	lineNum := 0
+	currDefIdx := -1
+	currDefIndent := 0
 
 	for scanner.Scan() {
 		lineNum++
 		line := scanner.Text()
+		trimmed := strings.TrimLeft(line, " \t")
 
 		if m := pyImportRe.FindStringSubmatch(line); len(m) > 1 {
 			res.Imports = append(res.Imports, m[1])
@@ -213,6 +274,7 @@ func parsePython(content []byte, res *ParseResult) (*ParseResult, error) {
 				Kind:      KindClass,
 				StartLine: lineNum,
 			})
+			currDefIdx = -1
 			continue
 		}
 		if m := pyDefRe.FindStringSubmatch(line); len(m) > 2 {
@@ -226,7 +288,29 @@ func parsePython(content []byte, res *ParseResult) (*ParseResult, error) {
 				Name:      name,
 				Kind:      kind,
 				StartLine: lineNum,
+				Calls:     []string{},
 			})
+			currDefIdx = len(res.Symbols) - 1
+			currDefIndent = len(indent)
+			continue
+		}
+
+		if currDefIdx >= 0 && len(trimmed) > 0 && !strings.HasPrefix(trimmed, "#") {
+			lineIndent := len(line) - len(trimmed)
+			if lineIndent <= currDefIndent {
+				currDefIdx = -1
+			} else {
+				matches := pyCallRe.FindAllStringSubmatch(line, -1)
+				for _, match := range matches {
+					if len(match) > 1 {
+						callName := match[1]
+						if !pyKeywords[callName] {
+							res.Symbols[currDefIdx].Calls = append(res.Symbols[currDefIdx].Calls, callName)
+							res.Calls = append(res.Calls, callName)
+						}
+					}
+				}
+			}
 		}
 	}
 	return res, scanner.Err()
@@ -241,13 +325,23 @@ var (
 	jsClassRe      = regexp.MustCompile(`(?:export\s+)?class\s+([a-zA-Z0-9_]+)`)
 	jsFuncRe       = regexp.MustCompile(`(?:export\s+)?(?:async\s+)?function\s+([a-zA-Z0-9_]+)`)
 	jsMethodRe     = regexp.MustCompile(`^\s*(?:(?:public|private|protected|async|static)\s+)*([a-zA-Z0-9_]+)\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*\{`)
+	jsCallRe       = regexp.MustCompile(`(?:\b|[.])([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(`)
 )
+
+var jsKeywords = map[string]bool{
+	"function": true, "if": true, "for": true, "while": true, "switch": true,
+	"catch": true, "return": true, "import": true, "require": true, "typeof": true,
+	"super": true, "console": true, "log": true, "new": true, "delete": true,
+	"throw": true, "async": true, "await": true, "yield": true,
+}
 
 func parseJSorTS(content []byte, res *ParseResult) (*ParseResult, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(content))
 	lineNum := 0
 	braceDepth := 0
 	classBraceDepth := -1
+	currSymIdx := -1
+	fnBraceDepth := -1
 
 	for scanner.Scan() {
 		lineNum++
@@ -288,7 +382,10 @@ func parseJSorTS(content []byte, res *ParseResult) (*ParseResult, error) {
 						Name:      name,
 						Kind:      KindMethod,
 						StartLine: lineNum,
+						Calls:     []string{},
 					})
+					currSymIdx = len(res.Symbols) - 1
+					fnBraceDepth = braceDepth
 				}
 			}
 		} else {
@@ -298,7 +395,24 @@ func parseJSorTS(content []byte, res *ParseResult) (*ParseResult, error) {
 					Name:      m[1],
 					Kind:      KindFunction,
 					StartLine: lineNum,
+					Calls:     []string{},
 				})
+				currSymIdx = len(res.Symbols) - 1
+				fnBraceDepth = braceDepth
+			}
+		}
+
+		// Check function calls if inside a function/method
+		if currSymIdx >= 0 && braceDepth > fnBraceDepth {
+			matches := jsCallRe.FindAllStringSubmatch(line, -1)
+			for _, match := range matches {
+				if len(match) > 1 {
+					callName := match[1]
+					if !jsKeywords[callName] {
+						res.Symbols[currSymIdx].Calls = append(res.Symbols[currSymIdx].Calls, callName)
+						res.Calls = append(res.Calls, callName)
+					}
+				}
 			}
 		}
 
@@ -311,6 +425,10 @@ func parseJSorTS(content []byte, res *ParseResult) (*ParseResult, error) {
 				if classBraceDepth >= 0 && braceDepth <= classBraceDepth {
 					classBraceDepth = -1
 				}
+				if currSymIdx >= 0 && braceDepth <= fnBraceDepth {
+					currSymIdx = -1
+					fnBraceDepth = -1
+				}
 			}
 		}
 	}
@@ -319,18 +437,28 @@ func parseJSorTS(content []byte, res *ParseResult) (*ParseResult, error) {
 
 // --- Rust parser ---
 var (
-	rsUseRe       = regexp.MustCompile(`^\s*use\s+([^;]+);`)
-	rsTraitRe     = regexp.MustCompile(`(?:pub\s+)?trait\s+([a-zA-Z0-9_]+)`)
-	rsStructRe    = regexp.MustCompile(`(?:pub\s+)?struct\s+([a-zA-Z0-9_]+)`)
-	rsImplRe      = regexp.MustCompile(`^\s*impl(?:\s+.*?)?\s+([a-zA-Z0-9_]+)`)
-	rsFnRe        = regexp.MustCompile(`(?:pub\s+)?(?:async\s+)?fn\s+([a-zA-Z0-9_]+)`)
+	rsUseRe    = regexp.MustCompile(`^\s*use\s+([^;]+);`)
+	rsTraitRe  = regexp.MustCompile(`(?:pub\s+)?trait\s+([a-zA-Z0-9_]+)`)
+	rsStructRe = regexp.MustCompile(`(?:pub\s+)?struct\s+([a-zA-Z0-9_]+)`)
+	rsImplRe   = regexp.MustCompile(`^\s*impl(?:\s+.*?)?\s+([a-zA-Z0-9_]+)`)
+	rsFnRe     = regexp.MustCompile(`(?:pub\s+)?(?:async\s+)?fn\s+([a-zA-Z0-9_]+)`)
+	rsCallRe   = regexp.MustCompile(`(?:\b|[.:])([a-zA-Z_][a-zA-Z0-9_]*)\s*\(`)
 )
+
+var rsKeywords = map[string]bool{
+	"fn": true, "if": true, "while": true, "for": true, "match": true,
+	"return": true, "let": true, "loop": true, "println": true, "panic": true,
+	"vec": true, "format": true, "Some": true, "Ok": true, "Err": true,
+	"None": true,
+}
 
 func parseRust(content []byte, res *ParseResult) (*ParseResult, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(content))
 	lineNum := 0
 	braceDepth := 0
 	implBraceDepth := -1
+	currSymIdx := -1
+	fnBraceDepth := -1
 
 	for scanner.Scan() {
 		lineNum++
@@ -375,7 +503,24 @@ func parseRust(content []byte, res *ParseResult) (*ParseResult, error) {
 				Name:      m[1],
 				Kind:      kind,
 				StartLine: lineNum,
+				Calls:     []string{},
 			})
+			currSymIdx = len(res.Symbols) - 1
+			fnBraceDepth = braceDepth
+		}
+
+		// Check function calls if inside function
+		if currSymIdx >= 0 && braceDepth > fnBraceDepth {
+			matches := rsCallRe.FindAllStringSubmatch(line, -1)
+			for _, match := range matches {
+				if len(match) > 1 {
+					callName := match[1]
+					if !rsKeywords[callName] {
+						res.Symbols[currSymIdx].Calls = append(res.Symbols[currSymIdx].Calls, callName)
+						res.Calls = append(res.Calls, callName)
+					}
+				}
+			}
 		}
 
 		for _, ch := range line {
@@ -385,6 +530,10 @@ func parseRust(content []byte, res *ParseResult) (*ParseResult, error) {
 				braceDepth--
 				if implBraceDepth >= 0 && braceDepth <= implBraceDepth {
 					implBraceDepth = -1
+				}
+				if currSymIdx >= 0 && braceDepth <= fnBraceDepth {
+					currSymIdx = -1
+					fnBraceDepth = -1
 				}
 			}
 		}
