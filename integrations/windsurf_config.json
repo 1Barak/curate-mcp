@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "curate": {
+      "command": "curate",
+      "args": ["-w", "${workspaceFolder}"]
+    }
+  }
+}
