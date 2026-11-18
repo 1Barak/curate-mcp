@@ -268,6 +268,7 @@ Measured on physical hardware (AMD Ryzen 5, NVMe SSD) across real production and
 | **Hybrid Backend & CLI Suite** | Go + Node.js | 567 | 2,920 | 4,985 | **659.7 ms** | **3.57 ms** | **4.4 MB** |
 | **Full-Stack Web Monolith** | JavaScript / Node.js | 615 | 2,064 | 3,156 | **859.0 ms** | **2.24 ms** | **4.3 MB** |
 | **Enterprise Infra Monorepo** | Multi-Language | 689 | 3,393 | 4,550 | **840.4 ms** | **3.30 ms** | **3.8 MB** |
+| **`golang/go` (Compiler & Runtime)** | Go Core / Stdlib | 10,829 | 120,752 | 141,203 | **5.16 s** | **121.0 ms** | **143.5 MB** |
 
 ### 📈 Synthetic Monorepo Scalability Benchmarks
 Validate latency and memory efficiency across 1,000 to 55,000 node graphs:
