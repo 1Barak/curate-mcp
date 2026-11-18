@@ -17,7 +17,11 @@
 - **Single Static Binary (Zero Runtime Dependencies):** No Python virtual environments, no Node.js runtime, no Docker containers, and no external graph databases (Neo4j/Memgraph). Pure static Go (`CGO_ENABLED=0`).
 - **Multi-Language AST Support (7 Core Languages):** Native parsing for **Go**, **Python**, **TypeScript/TSX**, **JavaScript/JSX**, **Rust**, **C/C++**, and **Java**.
 - **Real-Time Reactive Sync:** Multi-platform file watcher (`fsnotify`) with 75 ms debouncing absorbs I/O bursts and updates the in-memory graph immediately upon file changes.
-- **Context Shield (Strict Token Preservation):** Multi-field weighted scoring (`label*2.0 + path*1.5 + imports*1.0`) combined with deterministic 3-stage cascading pruning (`symbols` $\rightarrow$ `entrypoints` $\rightarrow$ `primary_files`) guarantees a strict Hard Cap ($\le 1,000$ tokens).
+- **Cross-Module Functional Graph (v1.2.0):** In-memory cross-module resolution for functional calls (`calls`) and module imports (`imports`), enabling exact pathfinding and eliminating heuristic false positives.
+- **Autonomous Memory Management (v1.2.0):** Built-in soft memory cap (200 MB via `debug.SetMemoryLimit`), automatic idle memory purger (`debug.FreeOSMemory()` after 60s of inactivity), and reusable `sync.Pool` JSON buffers for zero-allocation serialization.
+- **Adaptive Repo-Scale Token Budget:** Elastic context budgets (`CalculateAdaptiveBudget`: 1,000 to 3,500 tokens) with deterministic pagination (`offset_files`, `has_more`, `next_offset_files`).
+- **Structural Diagnostics (v1.2.0):** Proactively detects unused imports (`unused_imports`) and dead code symbols (`dead_symbols` where $in\_degree = 0$) in real time.
+- **Actionable Error Self-Healing:** Standard MCP JSON-RPC `-32602` typed errors with bounded suggestions ($\le 5$) and dynamic recovery `hint` directives to prevent agent hallucination loops.
 - **Security-First Architecture:** Active defense against Path Traversal and workspace escape vectors.
 
 ---
@@ -144,23 +148,28 @@ Add to your MCP configuration:
 ## 🛠️ MCP Tool Reference
 
 ### `curate_slice`
-Extracts a focused AST sub-graph relevant to a specified task or user intent.
+Extracts a focused AST sub-graph relevant to a specified task or user intent with adaptive token budgeting and pagination.
 
 **Parameters:**
 - `intent` *(string, required)*: Natural language description of what you are searching for or working on (e.g., `"user authentication middleware and jwt tokens"`).
 - `max_files` *(integer, optional)*: Maximum number of primary files to retrieve (default: `5`).
+- `offset_files` *(integer, optional)*: Zero-based file offset for deterministic pagination (default: `0`).
 - `workspace` *(string, optional)*: Path to the workspace (defaults to configured root).
+
+**Output:** Includes `primary_files`, `entrypoints`, `has_more`, `total_matching_files`, `total_matching_symbols`, `truncated_symbols_count`, `next_offset_files`, and `structural_diagnostics` (`unused_imports`, `dead_symbols`).
 
 ---
 
 ### `get_blast_radius`
-Calculates upstream callers $P(u)$, downstream callees $S(u)$, and the Criticality Index ($I_c$) for a given symbol or file before applying changes.
+Calculates upstream callers $P(u)$, downstream callees $S(u)$, Criticality Index ($I_c = 3 \times \text{in\_degree} + \text{out\_degree}$), risk level (`BAJO`, `MEDIO`, `ALTO`, `CRÍTICO`), and persists OTel receipts to disk.
 
 **Parameters:**
-- `node_name` *(string, required)*: Target symbol or file identifier (e.g., `"pkg/graph/engine.go"` or `"NewEngine"`).
+- `node_name` *(string, required)*: Target symbol or file identifier (supports automatic suffix fuzzy resolution, e.g. `"LayaInferenceEngine"` resolves to full ID).
 - `depth` *(integer, optional)*: BFS traversal depth limit (default: `2`, max: `5`).
 - `max_nodes` *(integer, optional)*: Maximum number of nodes to extract (default: `50`, max: `200`).
-- `persist_receipt` *(boolean, optional)*: Explicitly toggle OTel receipt emission to disk.
+- `workspace` *(string, optional)*: Target workspace directory.
+
+**Error Handling:** If the symbol is not found, returns MCP JSON-RPC `-32602` with bounded suggestions ($\le 5$) and an actionable `hint` recovery directive to prevent agent loop conditions.
 
 ---
 
@@ -170,39 +179,55 @@ Discovers the shortest directed dependency path between two symbols or files via
 **Parameters:**
 - `node_a` *(string, required)*: Origin symbol or file identifier.
 - `node_b` *(string, required)*: Destination symbol or file identifier.
+- `workspace` *(string, optional)*: Target workspace directory.
+
+**Output:** Returns `connected: true/false`, `length` (hop count), and the ordered `path` array of exact functional call-sites. On lexical ambiguity (e.g. multiple `main` functions), returns `-32602` with top suggestions.
 
 ---
 
 ### `get_architecture_summary`
-Provides instant topological cardinality metrics and ranks the Top 10 critical *God Nodes* by functional degree.
+Provides instant topological cardinality metrics and ranks the Top God Nodes by functional degree in dual formats.
 
-**Parameters:** None.
+**Parameters:**
+- `format` *(string, optional)*: Output representation format:
+  - `"json"` *(default)*: Ultra-compact JSON ($\le 310$ bytes, ~78 tokens) for zero context waste.
+  - `"markdown"`: Executive Markdown report ($\le 830$ bytes) with Top 5 God Nodes and topological health status.
+- `workspace` *(string, optional)*: Target workspace directory.
 
-**Output:**
+**Example JSON Output (`format: "json"`):**
 ```json
 {
   "status": "ok",
-  "project": "my-service",
-  "intent": "user authentication middleware and jwt tokens",
-  "primary_files": [
-    {
-      "path": "src/auth/token.go",
-      "language": "go",
-      "score": 8.5,
-      "symbols": [
-        {"name": "GenerateToken", "kind": "function", "start_line": 24},
-        {"name": "TokenVerifier", "kind": "struct", "start_line": 45}
-      ]
-    }
-  ],
-  "entrypoints": [
-    {
-      "path": "cmd/api/server.go",
-      "role": "upstream_caller"
-    }
-  ],
-  "duration_ms": 0
+  "total_files": 732,
+  "total_symbols": 2970,
+  "total_edges": 4722,
+  "edges_by_type": {
+    "calls": 1511,
+    "defines": 2970,
+    "imports": 241
+  },
+  "god_nodes": [
+    "infrastructure/vps-adb-bridge/contract.cjs:errorResponse"
+  ]
 }
+```
+
+**Example Markdown Output (`format: "markdown"`):**
+```markdown
+# Architecture Summary
+
+## Health Metrics
+- **Files**: 732
+- **Symbols**: 2970
+- **Edges**: 4722 (calls: 1511, defines: 2970, imports: 241)
+
+## God Nodes (Top 5)
+- `infrastructure/vps-adb-bridge/contract.cjs:errorResponse`: total_degree=36 (in=36, out=0)
+- `infrastructure/vps-adb-bridge/adb-wrapper.cjs:runAdb`: total_degree=32 (in=32, out=0)
+- `infrastructure/vps-adb-bridge/contract.cjs:successResponse`: total_degree=24 (in=24, out=0)
+
+## Structural Warnings
+- Status: Topology health is nominal with zero critical warnings.
 ```
 
 ---
