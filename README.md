@@ -13,15 +13,15 @@
 
 ## ⚡ Key Highlights
 
-- **Sub-millisecond Performance:** Queries resolve in $< 1\text{ ms}$ directly from memory via concurrent `sync.RWMutex` adjacency maps.
+- **Sub-millisecond Performance:** Queries resolve in < 1 ms directly from memory via concurrent `sync.RWMutex` adjacency maps.
 - **Single Static Binary (Zero Runtime Dependencies):** No Python virtual environments, no Node.js runtime, no Docker containers, and no external graph databases (Neo4j/Memgraph). Pure static Go (`CGO_ENABLED=0`).
 - **Multi-Language AST Support (7 Core Languages):** Native parsing for **Go**, **Python**, **TypeScript/TSX**, **JavaScript/JSX**, **Rust**, **C/C++**, and **Java**.
 - **Real-Time Reactive Sync:** Multi-platform file watcher (`fsnotify`) with 75 ms debouncing absorbs I/O bursts and updates the in-memory graph immediately upon file changes.
 - **Cross-Module Functional Graph (v1.2.0):** In-memory cross-module resolution for functional calls (`calls`) and module imports (`imports`), enabling exact pathfinding and eliminating heuristic false positives.
 - **Autonomous Memory Management (v1.2.0):** Built-in soft memory cap (200 MB via `debug.SetMemoryLimit`), automatic idle memory purger (`debug.FreeOSMemory()` after 60s of inactivity), and reusable `sync.Pool` JSON buffers for zero-allocation serialization.
 - **Adaptive Repo-Scale Token Budget:** Elastic context budgets (`CalculateAdaptiveBudget`: 1,000 to 3,500 tokens) with deterministic pagination (`offset_files`, `has_more`, `next_offset_files`).
-- **Structural Diagnostics (v1.2.0):** Proactively detects unused imports (`unused_imports`) and dead code symbols (`dead_symbols` where $in\_degree = 0$) in real time.
-- **Actionable Error Self-Healing:** Standard MCP JSON-RPC `-32602` typed errors with bounded suggestions ($\le 5$) and dynamic recovery `hint` directives to prevent agent hallucination loops.
+- **Structural Diagnostics (v1.2.0):** Proactively detects unused imports (`unused_imports`) and dead code symbols (`dead_symbols` where `in_degree = 0`) in real time.
+- **Actionable Error Self-Healing:** Standard MCP JSON-RPC `-32602` typed errors with bounded suggestions (≤ 5) and dynamic recovery `hint` directives to prevent agent hallucination loops.
 - **Security-First Architecture:** Active defense against Path Traversal and workspace escape vectors.
 
 ---
@@ -30,13 +30,13 @@
 
 ```mermaid
 flowchart LR
-    FS["File System\n(Linux / macOS / Windows)"] -->|Events| Watcher["fsnotify Dispatcher\n(75ms Debounce)"]
-    Watcher -->|Changed Files| Parser["7-Language AST Dispatcher\n(Go, Py, TS, JS, Rs, C++, Java)"]
-    Parser -->|Definitions & Imports| Engine["In-Memory Directed Graph\n(sync.RWMutex in RAM)"]
+    FS["File System<br/>Linux / macOS / Windows"] -->|Events| Watcher["fsnotify Dispatcher<br/>75ms Debounce"]
+    Watcher -->|Changed Files| Parser["7-Language AST Dispatcher<br/>Go, Py, TS, JS, Rs, C++, Java"]
+    Parser -->|Definitions and Imports| Engine["In-Memory Directed Graph<br/>sync.RWMutex in RAM"]
     
-    Agent["AI Coding Agent\n(Claude, Cursor, Windsurf, Antigravity)"] -->|curate_slice(intent)| Server["MCP Server (stdio)"]
-    Server -->|Query| Scorer["Multi-Field Scorer\n(2.0*Label + 1.5*Path + 1.0*Imports)"]
-    Scorer -->|Sub-graph| Pruner["Deterministic Pruner\n(Hard Cap <= 1,000 tok)"]
+    Agent["AI Coding Agent<br/>Claude, Cursor, Windsurf, Antigravity"] -->|"curate_slice(intent)"| Server["MCP Server (stdio)"]
+    Server -->|Query| Scorer["Multi-Field Scorer<br/>2.0*Label + 1.5*Path + 1.0*Imports"]
+    Scorer -->|Sub-graph| Pruner["Deterministic Pruner<br/>Hard Cap: 1,000 tokens"]
     Pruner -->|Surgical JSON Payload| Server
     Server -->|Sub-millisecond Response| Agent
 ```
@@ -50,14 +50,14 @@ flowchart LR
 
 ### Build from Source
 ```bash
-git clone https://github.com/<your-username>/curate-mcp.git
+git clone https://github.com/1Barak/curate-mcp.git
 cd curate-mcp
 
 # Build native static executable
 go build -o bin/curate ./cmd/curate
 ```
 
-The resulting standalone binary in `bin/curate` (or `bin/curate.exe` on Windows) is $< 5\text{ MB}$ and ready to run.
+The resulting standalone binary in `bin/curate` (or `bin/curate.exe` on Windows) is < 5 MB and ready to run.
 
 ---
 
@@ -161,7 +161,7 @@ Extracts a focused AST sub-graph relevant to a specified task or user intent wit
 ---
 
 ### `get_blast_radius`
-Calculates upstream callers $P(u)$, downstream callees $S(u)$, Criticality Index ($I_c = 3 \times \text{in\_degree} + \text{out\_degree}$), risk level (`BAJO`, `MEDIO`, `ALTO`, `CRÍTICO`), and persists OTel receipts to disk.
+Calculates upstream callers `P(u)`, downstream callees `S(u)`, Criticality Index (`I_c = 3 * in_degree + out_degree`), risk level (`BAJO`, `MEDIO`, `ALTO`, `CRÍTICO`), and persists OTel receipts to disk.
 
 **Parameters:**
 - `node_name` *(string, required)*: Target symbol or file identifier (supports automatic suffix fuzzy resolution, e.g. `"LayaInferenceEngine"` resolves to full ID).
@@ -169,7 +169,7 @@ Calculates upstream callers $P(u)$, downstream callees $S(u)$, Criticality Index
 - `max_nodes` *(integer, optional)*: Maximum number of nodes to extract (default: `50`, max: `200`).
 - `workspace` *(string, optional)*: Target workspace directory.
 
-**Error Handling:** If the symbol is not found, returns MCP JSON-RPC `-32602` with bounded suggestions ($\le 5$) and an actionable `hint` recovery directive to prevent agent loop conditions.
+**Error Handling:** If the symbol is not found, returns MCP JSON-RPC `-32602` with bounded suggestions (≤ 5) and an actionable `hint` recovery directive to prevent agent loop conditions.
 
 ---
 
@@ -190,8 +190,8 @@ Provides instant topological cardinality metrics and ranks the Top God Nodes by 
 
 **Parameters:**
 - `format` *(string, optional)*: Output representation format:
-  - `"json"` *(default)*: Ultra-compact JSON ($\le 310$ bytes, ~78 tokens) for zero context waste.
-  - `"markdown"`: Executive Markdown report ($\le 830$ bytes) with Top 5 God Nodes and topological health status.
+  - `"json"` *(default)*: Ultra-compact JSON (≤ 310 bytes, ~78 tokens) for zero context waste.
+  - `"markdown"`: Executive Markdown report (≤ 830 bytes) with Top 5 God Nodes and topological health status.
 - `workspace` *(string, optional)*: Target workspace directory.
 
 **Example JSON Output (`format: "json"`):**
@@ -240,7 +240,7 @@ Run the comprehensive unit and integration test suite:
 go test -v ./...
 ```
 
-All tests execute in $< 50\text{ ms}$ with zero dependencies.
+All tests execute in < 50 ms with zero dependencies.
 
 ---
 
@@ -258,7 +258,7 @@ All tests execute in $< 50\text{ ms}$ with zero dependencies.
 - Are you working with an enterprise monorepo or a large distributed team?
 - Need a specific language grammar or custom agent integration?
 
-👉 **[Open an Issue](https://github.com/curate-mcp/curate-mcp/issues)** or start a **Discussion** sharing your use case. Community feedback directly shapes our development priorities!
+👉 **[Open an Issue](https://github.com/1Barak/curate-mcp/issues)** or start a **Discussion** sharing your use case. Community feedback directly shapes our development priorities!
 
 ---
 
