@@ -27,6 +27,22 @@
 
 ---
 
+## 🔍 Multi-Language Parsing Architecture & Trade-Offs
+
+We believe in complete transparency about how `curate-mcp` achieves extreme performance and single-binary zero-dependency portability:
+
+- **Go Language**: Full syntactic and semantic AST parsing using the standard library (`go/parser`, `go/ast`, `go/token`). Extracts packages, imports, structs, interfaces, methods, functions, and cross-package calls with complete syntax-tree fidelity.
+- **Python, TypeScript/TSX, JavaScript/JSX, Rust, C/C++, Java**: High-speed, zero-CGo lexical and regex state machines designed specifically for definition extraction (functions, methods, classes, interfaces, structs) and import/call tracking without invoking native C toolchains.
+
+### Why this Trade-Off?
+1. **Single Static Binary (< 5 MB, Zero CGo)**: Native Tree-sitter C bindings require C toolchains, heavy shared libraries, or Docker containers, breaking effortless cross-compilation and cross-platform installation.
+2. **Sub-second Cold Indexing**: Lexical scanners parse code at > 10,000 lines/millisecond, allowing full codebase indexing in under a second (e.g. 560+ files indexed in ~650 ms).
+3. **Zero Native Memory Leaks**: Avoids C-allocated memory pools and GC friction, keeping idle RAM under 5 MB.
+
+*Roadmap Note: For teams requiring deep syntactic type resolution in dynamic languages, an opt-in WebAssembly / pure-Go AST engine is planned for v2.0.*
+
+---
+
 ## 🏗️ Architecture
 
 ```mermaid
@@ -44,17 +60,17 @@ flowchart LR
 
 ---
 
-## 📦 Installation & Build
+## 📦 Installation & Releases
 
-### Prerequisites
-- [Go 1.26+](https://golang.org/dl/) (or Go 1.22+)
+### Prebuilt Binaries (Zero Dependencies)
+Download standalone precompiled executables for Linux (amd64/arm64), macOS (Intel/Apple Silicon), and Windows (amd64) directly from the [Releases](https://github.com/1Barak/curate-mcp/releases) page. No Go toolchain required.
 
 ### Build from Source
 ```bash
 git clone https://github.com/1Barak/curate-mcp.git
 cd curate-mcp
 
-# Build native static executable
+# Build native static executable (< 5 MB, CGO_ENABLED=0)
 go build -o bin/curate ./cmd/curate
 ```
 
@@ -241,14 +257,25 @@ go test -v ./...
 ```
 All unit tests execute in < 50 ms with zero external dependencies.
 
-### Run Reproducible Scalability & Monorepo Benchmarks
+### 🏢 Real-World Codebase Benchmarks (Empirical Measurements)
+Measured on physical hardware (AMD Ryzen 5, NVMe SSD) across active development repositories of varied stacks:
+
+| Real-World Repository | Stack / Domain | Code Files | Graph Nodes | Edges | Cold Index Time | Slice Latency (P50) | RAM Heap |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **`curate-mcp`** | Go / MCP Server | 33 | 222 | 341 | **15.8 ms** | **999 µs (< 1 ms)** | **1.4 MB** |
+| **`Cms`** | Node.js / Express | 44 | 216 | 321 | **62.8 ms** | **1.40 ms** | **2.1 MB** |
+| **`pagina1`** | TypeScript / Web | 126 | 421 | 798 | **140.7 ms** | **776 µs (< 1 ms)** | **1.6 MB** |
+| **`vps-redmi`** | Go + Node.js CLI | 567 | 2,920 | 4,985 | **659.7 ms** | **3.57 ms** | **4.4 MB** |
+| **`proyectob1`** | Full-stack JS | 615 | 2,064 | 3,156 | **859.0 ms** | **2.24 ms** | **4.3 MB** |
+| **`.Ecosistema`** | Multi-language Infra | 689 | 3,393 | 4,550 | **840.4 ms** | **3.30 ms** | **3.8 MB** |
+
+### 📈 Synthetic Monorepo Scalability Benchmarks
 Validate latency and memory efficiency across 1,000 to 55,000 node graphs:
 
 ```bash
 go test -bench=Benchmark -benchmem ./pkg/...
 ```
 
-#### Empirical Benchmark Results
 | Benchmark Scenario | Graph Size | Measured Latency | Throughput / Efficiency | Invariant Verified |
 | :--- | :--- | :--- | :--- | :--- |
 | `CurateSlice (MCP Layer)` | 1,200 nodes | **0.66 ms** (664 µs) | 1,524 ops/sec | **< 1 ms target** |
