@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }} - Go ${{ matrix.go-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+        go-version: [ '1.23', '1.24' ]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go ${{ matrix.go-version }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          check-latest: true
+
+      - name: Verify Module Dependencies
+        run: go mod verify
+
+      - name: Static Analysis (go vet)
+        run: go vet ./...
+
+      - name: Run Unit & Integration Tests
+        run: go test -v ./...
+
+      - name: Build Standalone Executable
+        run: go build -v -o bin/curate ./cmd/curate
+
+  benchmark:
+    name: Monorepo Benchmarks (Ubuntu - Go 1.24)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go 1.24
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Run Scalability & Monorepo Benchmarks
+        run: go test -v -bench=Benchmark -run=^$ -benchmem ./...
+
+  cross-compile:
+    name: Cross-Compilation Matrix (Zero CGO)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            output: bin/curate-linux-amd64
+          - goos: linux
+            goarch: arm64
+            output: bin/curate-linux-arm64
+          - goos: darwin
+            goarch: amd64
+            output: bin/curate-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            output: bin/curate-darwin-arm64
+          - goos: windows
+            goarch: amd64
+            output: bin/curate-windows-amd64.exe
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go 1.24
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Compile Static Standalone Binary (${{ matrix.goos }}/${{ matrix.goarch }})
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -ldflags="-s -w" -o ${{ matrix.output }} ./cmd/curate
