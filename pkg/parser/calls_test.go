@@ -116,3 +116,75 @@ function login() {
 		}
 	})
 }
+
+// TestParser_CompositeLit_TypeUsage validates SPEC-004 RF-1:
+// Extraction of type references in CompositeLit (scoredItem{}), ValueSpec (var x scoredItem),
+// TypeSpec (struct/interface fields) and function signatures (params and results).
+func TestParser_CompositeLit_TypeUsage(t *testing.T) {
+	dispatcher := NewDispatcher()
+
+	code := `package main
+
+type scoredItem struct {
+	id    int
+	score float64
+}
+
+type TokenValidator interface {
+	Validate() bool
+}
+
+type WorkerConfig struct {
+	item      scoredItem
+	validator TokenValidator
+}
+
+func ProcessItem(item scoredItem) scoredItem {
+	var local scoredItem
+	slice := []scoredItem{scoredItem{id: 1, score: 2.5}}
+	_ = local
+	_ = slice
+	return item
+}
+`
+	res, err := dispatcher.Parse("pkg/service/item.go", []byte(code))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(res.Symbols) != 4 {
+		t.Fatalf("expected 4 symbols, got %d", len(res.Symbols))
+	}
+
+	var workerConfigSym *Symbol
+	var processItemSym *Symbol
+	for i := range res.Symbols {
+		if res.Symbols[i].Name == "WorkerConfig" {
+			workerConfigSym = &res.Symbols[i]
+		}
+		if res.Symbols[i].Name == "ProcessItem" {
+			processItemSym = &res.Symbols[i]
+		}
+	}
+
+	if workerConfigSym == nil {
+		t.Fatal("WorkerConfig symbol not found")
+	}
+	assertContainsCall(t, workerConfigSym.Calls, "scoredItem")
+	assertContainsCall(t, workerConfigSym.Calls, "TokenValidator")
+
+	if processItemSym == nil {
+		t.Fatal("ProcessItem symbol not found")
+	}
+	assertContainsCall(t, processItemSym.Calls, "scoredItem")
+}
+
+func assertContainsCall(t *testing.T, calls []string, expected string) {
+	t.Helper()
+	for _, c := range calls {
+		if c == expected {
+			return
+		}
+	}
+	t.Errorf("expected calls %v to contain %q", calls, expected)
+}

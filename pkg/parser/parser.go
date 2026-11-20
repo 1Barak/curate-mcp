@@ -15,7 +15,7 @@ import (
 // Standard errors for parser operations.
 var (
 	ErrUnsupportedLanguage = errors.New("parser: unsupported language extension")
-	ErrNotImplemented       = errors.New("parser: tree-sitter grammar engine not implemented")
+	ErrNotImplemented      = errors.New("parser: tree-sitter grammar engine not implemented")
 )
 
 // SymbolKind represents the type of an extracted code definition.
@@ -152,6 +152,70 @@ var goBuiltins = map[string]bool{
 	"recover": true,
 }
 
+var goBuiltinTypes = map[string]bool{
+	"bool":       true,
+	"byte":       true,
+	"complex64":  true,
+	"complex128": true,
+	"error":      true,
+	"float32":    true,
+	"float64":    true,
+	"int":        true,
+	"int8":       true,
+	"int16":      true,
+	"int32":      true,
+	"int64":      true,
+	"rune":       true,
+	"string":     true,
+	"uint":       true,
+	"uint8":      true,
+	"uint16":     true,
+	"uint32":     true,
+	"uint64":     true,
+	"uintptr":    true,
+	"any":        true,
+	"comparable": true,
+}
+
+func extractTypeNames(expr goast.Expr) []string {
+	if expr == nil {
+		return nil
+	}
+	var res []string
+	switch e := expr.(type) {
+	case *goast.Ident:
+		if !goBuiltinTypes[e.Name] && !goBuiltins[e.Name] {
+			res = append(res, e.Name)
+		}
+	case *goast.SelectorExpr:
+		if e.Sel != nil && !goBuiltinTypes[e.Sel.Name] {
+			res = append(res, e.Sel.Name)
+		}
+	case *goast.StarExpr:
+		res = append(res, extractTypeNames(e.X)...)
+	case *goast.ArrayType:
+		res = append(res, extractTypeNames(e.Elt)...)
+	case *goast.MapType:
+		res = append(res, extractTypeNames(e.Key)...)
+		res = append(res, extractTypeNames(e.Value)...)
+	case *goast.Ellipsis:
+		res = append(res, extractTypeNames(e.Elt)...)
+	case *goast.ChanType:
+		res = append(res, extractTypeNames(e.Value)...)
+	case *goast.IndexExpr:
+		res = append(res, extractTypeNames(e.X)...)
+		res = append(res, extractTypeNames(e.Index)...)
+	case *goast.IndexListExpr:
+		res = append(res, extractTypeNames(e.X)...)
+		for _, idx := range e.Indices {
+			res = append(res, extractTypeNames(idx)...)
+		}
+	case *goast.ParenExpr:
+		res = append(res, extractTypeNames(e.X)...)
+	}
+	return res
+}
+
 func parseGo(filePath string, content []byte, res *ParseResult) (*ParseResult, error) {
 	fset := gotoken.NewFileSet()
 	f, err := goparser.ParseFile(fset, filePath, content, goparser.AllErrors)
@@ -172,18 +236,65 @@ func parseGo(filePath string, content []byte, res *ParseResult) (*ParseResult, e
 			for _, spec := range d.Specs {
 				if ts, ok := spec.(*goast.TypeSpec); ok {
 					line := fset.Position(ts.Pos()).Line
-					switch ts.Type.(type) {
+					var typeCalls []string
+					typeCallSet := make(map[string]bool)
+
+					addTypeCall := func(name string) {
+						if name != "" && !typeCallSet[name] {
+							typeCallSet[name] = true
+							typeCalls = append(typeCalls, name)
+							if !fileCallSet[name] {
+								fileCallSet[name] = true
+								res.Calls = append(res.Calls, name)
+							}
+						}
+					}
+
+					switch t := ts.Type.(type) {
 					case *goast.InterfaceType:
+						if t.Methods != nil {
+							for _, fld := range t.Methods.List {
+								if ft, isFunc := fld.Type.(*goast.FuncType); isFunc {
+									if ft.Params != nil {
+										for _, p := range ft.Params.List {
+											for _, tn := range extractTypeNames(p.Type) {
+												addTypeCall(tn)
+											}
+										}
+									}
+									if ft.Results != nil {
+										for _, r := range ft.Results.List {
+											for _, tn := range extractTypeNames(r.Type) {
+												addTypeCall(tn)
+											}
+										}
+									}
+								} else {
+									for _, tn := range extractTypeNames(fld.Type) {
+										addTypeCall(tn)
+									}
+								}
+							}
+						}
 						res.Symbols = append(res.Symbols, Symbol{
 							Name:      ts.Name.Name,
 							Kind:      KindInterface,
 							StartLine: line,
+							Calls:     typeCalls,
 						})
 					case *goast.StructType:
+						if t.Fields != nil {
+							for _, fld := range t.Fields.List {
+								for _, tn := range extractTypeNames(fld.Type) {
+									addTypeCall(tn)
+								}
+							}
+						}
 						res.Symbols = append(res.Symbols, Symbol{
 							Name:      ts.Name.Name,
 							Kind:      KindStruct,
 							StartLine: line,
+							Calls:     typeCalls,
 						})
 					}
 				}
@@ -197,23 +308,59 @@ func parseGo(filePath string, content []byte, res *ParseResult) (*ParseResult, e
 
 			var symCalls []string
 			symCallSet := make(map[string]bool)
+
+			addSymCall := func(name string) {
+				if name != "" && !goBuiltins[name] && !goBuiltinTypes[name] && !symCallSet[name] {
+					symCallSet[name] = true
+					symCalls = append(symCalls, name)
+					if !fileCallSet[name] {
+						fileCallSet[name] = true
+						res.Calls = append(res.Calls, name)
+					}
+				}
+			}
+
+			// Capture types from function signature (parameters and results)
+			if d.Type != nil {
+				if d.Type.Params != nil {
+					for _, param := range d.Type.Params.List {
+						for _, tn := range extractTypeNames(param.Type) {
+							addSymCall(tn)
+						}
+					}
+				}
+				if d.Type.Results != nil {
+					for _, result := range d.Type.Results.List {
+						for _, tn := range extractTypeNames(result.Type) {
+							addSymCall(tn)
+						}
+					}
+				}
+			}
+
 			if d.Body != nil {
 				goast.Inspect(d.Body, func(n goast.Node) bool {
-					if call, ok := n.(*goast.CallExpr); ok {
+					switch node := n.(type) {
+					case *goast.CallExpr:
 						var callName string
-						switch fun := call.Fun.(type) {
+						switch fun := node.Fun.(type) {
 						case *goast.Ident:
 							callName = fun.Name
 						case *goast.SelectorExpr:
 							callName = fun.Sel.Name
 						}
-						if callName != "" && !goBuiltins[callName] && !symCallSet[callName] {
-							symCallSet[callName] = true
-							symCalls = append(symCalls, callName)
-							if !fileCallSet[callName] {
-								fileCallSet[callName] = true
-								res.Calls = append(res.Calls, callName)
-							}
+						addSymCall(callName)
+					case *goast.CompositeLit:
+						for _, tn := range extractTypeNames(node.Type) {
+							addSymCall(tn)
+						}
+					case *goast.ValueSpec:
+						for _, tn := range extractTypeNames(node.Type) {
+							addSymCall(tn)
+						}
+					case *goast.TypeAssertExpr:
+						for _, tn := range extractTypeNames(node.Type) {
+							addSymCall(tn)
 						}
 					}
 					return true

@@ -102,6 +102,9 @@ func (e *Engine) FindEntrypoints(seedNodeIDs []string) []string {
 	var result []string
 
 	addEntrypoint := func(id string) {
+		if strings.HasPrefix(id, "$root:") {
+			return
+		}
 		if !entrypointSet[id] {
 			entrypointSet[id] = true
 			result = append(result, id)

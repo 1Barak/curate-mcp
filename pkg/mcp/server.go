@@ -213,7 +213,7 @@ func (s *Server) CurateSlice(ctx context.Context, req CurateSliceRequest) (*Cura
 
 		for _, item := range scored {
 			filePath := item.node.FilePath
-			if filePath != "" && !fileSet[filePath] {
+			if filePath != "" && !fileSet[filePath] && !strings.HasPrefix(item.node.ID, "$root:") {
 				fileSet[filePath] = true
 				primaryFiles = append(primaryFiles, filePath)
 				seedIDs = append(seedIDs, item.node.ID)
@@ -297,15 +297,18 @@ func (e *RPCError) Error() string {
 }
 
 var (
-	ErrRPCInvalidParams            = &RPCError{Code: -32602, Message: "Invalid params"}
+	ErrRPCInvalidParams             = &RPCError{Code: -32602, Message: "Invalid params"}
 	ErrRPCReceiptsPathNotConfigured = &RPCError{Code: -32602, Message: "Invalid params: receipts path not configured"}
-	ErrRPCNodeNotFound             = &RPCError{Code: -32602, Message: "Invalid params: node not found"}
+	ErrRPCNodeNotFound              = &RPCError{Code: -32602, Message: "Invalid params: node not found"}
 )
 
-// StructuralDiagnostics represents structural health diagnostics (RF-5).
+// StructuralDiagnostics represents structural health diagnostics (RF-5 and SPEC-004 RF-3).
 type StructuralDiagnostics struct {
-	UnusedImports []string `json:"unused_imports"`
-	DeadSymbols   []string `json:"dead_symbols"`
+	UnusedImports         []string `json:"unused_imports"`
+	DeadSymbols           []string `json:"dead_symbols"`
+	DeadPrivate           []string `json:"dead_private"`
+	DeadExportedInternal  []string `json:"dead_exported_internal"`
+	UnreferencedPublicAPI []string `json:"unreferenced_public_api"`
 }
 
 // BlastRadiusRequest defines the JSON-RPC input schema for tool get_blast_radius.
@@ -557,12 +560,43 @@ func isPrivateSymbol(sym graph.Node) bool {
 	return strings.ToLower(firstChar) == firstChar && !unicode.IsUpper(rune(sym.Label[0]))
 }
 
-// computeStructuralDiagnostics analyzes the given files for unused imports and dead private symbols (RF-5).
+// isRuntimeEntrypoint determines if an unexported symbol is a runtime entrypoint (SPEC-004 RF-3).
+func isRuntimeEntrypoint(sym graph.Node) bool {
+	ext := filepath.Ext(sym.FilePath)
+	label := sym.Label
+	if ext == ".go" {
+		if label == "main" || label == "init" {
+			return true
+		}
+		if strings.HasSuffix(sym.FilePath, "_test.go") {
+			if strings.HasPrefix(label, "Test") || strings.HasPrefix(label, "Benchmark") || strings.HasPrefix(label, "Example") {
+				return true
+			}
+		}
+	}
+	if ext == ".py" {
+		if label == "__init__" || label == "__main__" || label == "<module>" {
+			return true
+		}
+	}
+	return false
+}
+
+// isInternalPath determines if a file path is inside an internal directory (SPEC-004 RF-3).
+func isInternalPath(p string) bool {
+	clean := filepath.ToSlash(p)
+	return strings.HasPrefix(clean, "internal/") || strings.Contains(clean, "/internal/")
+}
+
+// computeStructuralDiagnostics analyzes the given files for unused imports and dead private symbols (RF-5 and SPEC-004 RF-3).
 func (s *Server) computeStructuralDiagnostics(targetFiles []string) *StructuralDiagnostics {
 	if s.engine == nil || len(targetFiles) == 0 {
 		return &StructuralDiagnostics{
-			UnusedImports: []string{},
-			DeadSymbols:   []string{},
+			UnusedImports:         []string{},
+			DeadSymbols:           []string{},
+			DeadPrivate:           []string{},
+			DeadExportedInternal:  []string{},
+			UnreferencedPublicAPI: []string{},
 		}
 	}
 
@@ -597,6 +631,9 @@ func (s *Server) computeStructuralDiagnostics(targetFiles []string) *StructuralD
 
 	unusedImportsMap := make(map[string]bool)
 	deadSymbolsMap := make(map[string]bool)
+	deadPrivateMap := make(map[string]bool)
+	deadExportedInternalMap := make(map[string]bool)
+	unreferencedPublicAPIMap := make(map[string]bool)
 
 	// 1. Detect unused imports
 	for _, f := range fileNodes {
@@ -653,13 +690,9 @@ func (s *Server) computeStructuralDiagnostics(targetFiles []string) *StructuralD
 		}
 	}
 
-	// 2. Detect dead symbols (private symbols with in_degree_calls == 0)
+	// 2. Classify dead symbols according to SPEC-004 RF-3 taxonomy
 	for _, syms := range fileSymbols {
 		for _, sym := range syms {
-			if !isPrivateSymbol(sym) {
-				continue
-			}
-
 			inDegreeCalls := 0
 			preds := s.engine.GetPredecessors(sym.ID)
 			for _, p := range preds {
@@ -669,26 +702,42 @@ func (s *Server) computeStructuralDiagnostics(targetFiles []string) *StructuralD
 			}
 
 			if inDegreeCalls == 0 {
-				deadSymbolsMap[sym.ID] = true
+				if isPrivateSymbol(sym) {
+					if !isRuntimeEntrypoint(sym) {
+						deadPrivateMap[sym.ID] = true
+						deadSymbolsMap[sym.ID] = true
+					}
+				} else {
+					if isInternalPath(sym.FilePath) {
+						deadExportedInternalMap[sym.ID] = true
+					} else {
+						unreferencedPublicAPIMap[sym.ID] = true
+					}
+				}
 			}
 		}
 	}
 
-	unusedList := make([]string, 0, len(unusedImportsMap))
-	for imp := range unusedImportsMap {
-		unusedList = append(unusedList, imp)
-	}
-	sort.Strings(unusedList)
+	const maxListSize = 25
 
-	deadList := make([]string, 0, len(deadSymbolsMap))
-	for symID := range deadSymbolsMap {
-		deadList = append(deadList, symID)
+	sortAndCap := func(m map[string]bool) []string {
+		list := make([]string, 0, len(m))
+		for k := range m {
+			list = append(list, k)
+		}
+		sort.Strings(list)
+		if len(list) > maxListSize {
+			list = list[:maxListSize]
+		}
+		return list
 	}
-	sort.Strings(deadList)
 
 	return &StructuralDiagnostics{
-		UnusedImports: unusedList,
-		DeadSymbols:   deadList,
+		UnusedImports:         sortAndCap(unusedImportsMap),
+		DeadSymbols:           sortAndCap(deadSymbolsMap),
+		DeadPrivate:           sortAndCap(deadPrivateMap),
+		DeadExportedInternal:  sortAndCap(deadExportedInternalMap),
+		UnreferencedPublicAPI: sortAndCap(unreferencedPublicAPIMap),
 	}
 }
 

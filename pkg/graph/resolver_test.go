@@ -200,6 +200,7 @@ func buildFixtureEngine() *Engine {
 //   - edges_by_type.imports == 0
 //   - find_path between main and validatePassword returns connected: false
 //   - find_path between main and Login returns connected: false
+//
 // This test provides the empirical baseline proof of why Phase 2 is mandatory.
 func TestCrossModuleGraphResolution_RedPhaseBaseline(t *testing.T) {
 	engine := buildFixtureEngine()
@@ -505,4 +506,108 @@ func TestCrossModuleGraphResolution_FalsacionActiva(t *testing.T) {
 			t.Errorf("architectural violation: path was traversed across EdgeDefines to unrelated sibling: %v", res.Path)
 		}
 	})
+}
+
+// TestTypeUsageResolution_StructAndInterface validates SPEC-004 RF-1:
+// Cross-module and intra-file resolution of EdgeCalls from consumer functions/structs
+// to struct (KindStruct) and interface (KindInterface) definitions.
+func TestTypeUsageResolution_StructAndInterface(t *testing.T) {
+	engine := NewEngine()
+
+	file := "pkg/service/item.go"
+	_ = engine.AddNode(Node{
+		ID:       file,
+		Label:    "item.go",
+		FilePath: file,
+		Type:     NodeFile,
+	})
+
+	structID := "pkg/service/item.go:scoredItem"
+	_ = engine.AddNode(Node{
+		ID:       structID,
+		Label:    "scoredItem",
+		FilePath: file,
+		Type:     NodeSymbol,
+	})
+	_ = engine.AddEdge(Edge{From: file, To: structID, Type: EdgeDefines})
+
+	funcID := "pkg/service/item.go:ProcessItem"
+	_ = engine.AddNode(Node{
+		ID:       funcID,
+		Label:    "ProcessItem",
+		FilePath: file,
+		Type:     NodeSymbol,
+		Calls:    []string{"scoredItem"},
+	})
+	_ = engine.AddEdge(Edge{From: file, To: funcID, Type: EdgeDefines})
+
+	if err := engine.ResolveCrossModuleEdges(); err != nil {
+		t.Fatalf("ResolveCrossModuleEdges failed: %v", err)
+	}
+
+	// Verify EdgeCalls from ProcessItem to scoredItem
+	if !engine.HasEdge(funcID, structID, EdgeCalls) {
+		t.Errorf("expected EdgeCalls from %s -> %s for struct type usage", funcID, structID)
+	}
+
+	// Verify find_path
+	pathRes, err := engine.FindShortestPath(funcID, structID)
+	if err != nil {
+		t.Fatalf("FindShortestPath failed: %v", err)
+	}
+	if !pathRes.Connected {
+		t.Errorf("expected connected=true from %s to %s", funcID, structID)
+	}
+	if pathRes.Length != 1 {
+		t.Errorf("expected path length=1, got %d", pathRes.Length)
+	}
+}
+
+// TestTypeUsageResolution_FalsacionActiva verifies active falsification:
+// Removing the type reference from Calls legitimately breaks the EdgeCalls and find_path connection.
+func TestTypeUsageResolution_FalsacionActiva(t *testing.T) {
+	engine := NewEngine()
+
+	file := "pkg/service/item.go"
+	_ = engine.AddNode(Node{
+		ID:       file,
+		Label:    "item.go",
+		FilePath: file,
+		Type:     NodeFile,
+	})
+
+	structID := "pkg/service/item.go:scoredItem"
+	_ = engine.AddNode(Node{
+		ID:       structID,
+		Label:    "scoredItem",
+		FilePath: file,
+		Type:     NodeSymbol,
+	})
+	_ = engine.AddEdge(Edge{From: file, To: structID, Type: EdgeDefines})
+
+	funcID := "pkg/service/item.go:ProcessItem"
+	_ = engine.AddNode(Node{
+		ID:       funcID,
+		Label:    "ProcessItem",
+		FilePath: file,
+		Type:     NodeSymbol,
+		Calls:    []string{}, // severed type reference!
+	})
+	_ = engine.AddEdge(Edge{From: file, To: funcID, Type: EdgeDefines})
+
+	if err := engine.ResolveCrossModuleEdges(); err != nil {
+		t.Fatalf("ResolveCrossModuleEdges failed: %v", err)
+	}
+
+	if engine.HasEdge(funcID, structID, EdgeCalls) {
+		t.Errorf("Falsacion failure: unexpected EdgeCalls when Calls is empty")
+	}
+
+	pathRes, err := engine.FindShortestPath(funcID, structID)
+	if err != nil {
+		t.Fatalf("FindShortestPath failed: %v", err)
+	}
+	if pathRes.Connected {
+		t.Errorf("Falsacion failure: expected connected=false when type usage was severed")
+	}
 }

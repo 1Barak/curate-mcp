@@ -482,4 +482,3 @@ func TestArchitectureSummary_FalsacionActiva(t *testing.T) {
 		}
 	})
 }
-

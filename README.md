@@ -19,9 +19,10 @@
 - **Multi-Language AST Support (7 Core Languages):** Native parsing for **Go**, **Python**, **TypeScript/TSX**, **JavaScript/JSX**, **Rust**, **C/C++**, and **Java**.
 - **Real-Time Reactive Sync:** Multi-platform file watcher (`fsnotify`) with 75 ms debouncing absorbs I/O bursts and updates the in-memory graph immediately upon file changes.
 - **Cross-Module Functional Graph (v1.2.0):** In-memory cross-module resolution for functional calls (`calls`) and module imports (`imports`), enabling exact pathfinding and eliminating heuristic false positives.
+- **Go Structural Type References (v1.3.0):** Native AST tracking of `CompositeLit`, `ValueSpec`, `TypeSpec` and signature types, connecting struct/interface consumers to definitions and eliminating private struct false positives.
+- **Dynamic Manifest Roots (v1.3.0):** Ingestion of project entrypoints from `package.json`, `mcp_registry.json`, and `hooks.json` under virtual `$root:manifest` to protect CLI and MCP entrypoints from false dead code flags.
+- **Classified Dead Code Taxonomy (v1.3.0):** Categorized structural diagnostics distinguishing `dead_private`, `dead_exported_internal`, `unreferenced_public_api`, and `unused_imports` (with backwards-compatible `dead_symbols`).
 - **Autonomous Memory Management (v1.2.0):** Built-in soft memory cap (200 MB via `debug.SetMemoryLimit`), automatic idle memory purger (`debug.FreeOSMemory()` after 60s of inactivity), and reusable `sync.Pool` JSON buffers for zero-allocation serialization.
-- **Adaptive Repo-Scale Token Budget:** Elastic context budgets (`CalculateAdaptiveBudget`: 1,000 to 3,500 tokens) with deterministic pagination (`offset_files`, `has_more`, `next_offset_files`).
-- **Structural Diagnostics (v1.2.0):** Proactively detects unused imports (`unused_imports`) and dead code symbols (`dead_symbols` where `in_degree = 0`) in real time.
 - **Actionable Error Self-Healing:** Standard MCP JSON-RPC `-32602` typed errors with bounded suggestions (≤ 5) and dynamic recovery `hint` directives to prevent agent hallucination loops.
 - **Security-First Architecture:** Active defense against Path Traversal and workspace escape vectors.
 
@@ -173,7 +174,7 @@ Extracts a focused AST sub-graph relevant to a specified task or user intent wit
 - `offset_files` *(integer, optional)*: Zero-based file offset for deterministic pagination (default: `0`).
 - `workspace` *(string, optional)*: Path to the workspace (defaults to configured root).
 
-**Output:** Includes `primary_files`, `entrypoints`, `has_more`, `total_matching_files`, `total_matching_symbols`, `truncated_symbols_count`, `next_offset_files`, and `structural_diagnostics` (`unused_imports`, `dead_symbols`).
+**Output:** Includes `primary_files`, `entrypoints`, `has_more`, `total_matching_files`, `total_matching_symbols`, `truncated_symbols_count`, `next_offset_files`, and `structural_diagnostics` (`dead_private`, `dead_exported_internal`, `unreferenced_public_api`, `unused_imports`, and legacy `dead_symbols`).
 
 ---
 

@@ -47,7 +47,7 @@ func marshalIndentWithPool(v interface{}) ([]byte, error) {
 }
 
 const (
-	Version                    = "1.1.0"
+	Version                    = "1.3.0"
 	ToolName                   = "curate_slice"
 	ToolCurateSlice            = "curate_slice"
 	ToolGetBlastRadius         = "get_blast_radius"
@@ -267,6 +267,11 @@ func initialIndex(root string, engine *graph.Engine, dispatcher *parser.Dispatch
 		logger.Printf("Warning: failed to resolve cross-module edges during initial index: %v", err)
 	}
 
+	// Phase 2.5: Inject dynamic roots from manifests (RF-2)
+	if err := graph.InjectDynamicRoots(root, engine); err != nil {
+		logger.Printf("Warning: failed to inject dynamic roots during initial index: %v", err)
+	}
+
 	logger.Printf("Initial index completed in %v: %d files indexed, %d graph nodes, %d edges",
 		time.Since(startTime), indexedCount, engine.NodeCount(), engine.EdgeCount())
 }
@@ -327,6 +332,14 @@ func handleFileChange(ev watcher.FileEvent, root string, engine *graph.Engine, d
 	// Update Phase 2 cross-module functional edges
 	if err := engine.ResolveCrossModuleEdges(); err != nil {
 		logger.Printf("Warning: failed to resolve cross-module edges on file change: %v", err)
+	}
+
+	// Update Phase 2.5 dynamic roots if manifest changed (RF-2)
+	baseName := filepath.Base(ev.Path)
+	if baseName == "package.json" || baseName == "mcp_registry.json" || baseName == "hooks.json" {
+		if err := graph.InjectDynamicRoots(root, engine); err != nil {
+			logger.Printf("Warning: failed to re-inject dynamic roots on %s change: %v", baseName, err)
+		}
 	}
 
 	logger.Printf("Updated graph for %s (%d symbols extracted)", relPath, len(res.Symbols))

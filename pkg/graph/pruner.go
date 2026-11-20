@@ -36,6 +36,7 @@ type CuratedSlice struct {
 //   - Small: files < 100 && symbols < 500 -> 1000
 //   - Medium: (files >= 100 && files <= 1000) || (symbols >= 500 && symbols <= 5000), without exceeding Large -> 2000
 //   - Large: files > 1000 || symbols > 5000 -> 3500
+//
 // If maxTokens > 0, explicit maxTokens always prevails.
 func CalculateAdaptiveBudget(totalFiles, totalSymbols int, maxTokens int) int {
 	if maxTokens > 0 {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -23,10 +24,13 @@ type RPCErrorData struct {
 	Hint        string   `json:"hint"`
 }
 
-// StructuralDiagnosticsPayload represents the structural diagnostics schema required by RF-5.
+// StructuralDiagnosticsPayload represents the structural diagnostics schema required by RF-5 and SPEC-004 RF-3.
 type StructuralDiagnosticsPayload struct {
-	UnusedImports []string `json:"unused_imports"`
-	DeadSymbols   []string `json:"dead_symbols"`
+	UnusedImports         []string `json:"unused_imports"`
+	DeadSymbols           []string `json:"dead_symbols"`
+	DeadPrivate           []string `json:"dead_private,omitempty"`
+	DeadExportedInternal  []string `json:"dead_exported_internal,omitempty"`
+	UnreferencedPublicAPI []string `json:"unreferenced_public_api,omitempty"`
 }
 
 // parseErrorPayload marshals an error and parses the wire JSON-RPC error payload.
@@ -109,9 +113,9 @@ func assertNotContainsSymbol(t *testing.T, list []string, fullID, simpleLabel, f
 }
 
 // TestFuzzySymbolResolution validates RF-4:
-// - Query with simple name without path or prefix (e.g. 'LayaInferenceEngine') in get_blast_radius and find_path:
-//   if a unique node with that suffix exists, it must auto-resolve returning the complete node.
-// - Ambiguous suffix matches must NOT auto-resolve; they must return error -32602 with suggestions.
+//   - Query with simple name without path or prefix (e.g. 'LayaInferenceEngine') in get_blast_radius and find_path:
+//     if a unique node with that suffix exists, it must auto-resolve returning the complete node.
+//   - Ambiguous suffix matches must NOT auto-resolve; they must return error -32602 with suggestions.
 func TestFuzzySymbolResolution(t *testing.T) {
 	server := NewServer(ServerConfig{
 		WorkspaceRoot: "/workspace/curate-mcp",
@@ -561,4 +565,105 @@ func TestStructuralDiagnostics(t *testing.T) {
 		// NOW validatePassword MUST be detected as dead symbol!
 		assertContainsSymbol(t, diag.DeadSymbols, validateSym, "validatePassword", "dead_symbols (now orphaned)")
 	})
+}
+
+// TestStructuralDiagnostics_Taxonomy validates SPEC-004 RF-3:
+// Categorized taxonomy: dead_private, dead_exported_internal, unreferenced_public_api,
+// with runtime entrypoint exclusions (main, init) and retrocompatible dead_symbols alias.
+func TestStructuralDiagnostics_Taxonomy(t *testing.T) {
+	server := NewServer(ServerConfig{
+		WorkspaceRoot: "/workspace/curate-mcp",
+	})
+	engine := graph.NewEngine()
+
+	// 1. Files
+	authFile := "pkg/auth/service.go"
+	internalFile := "pkg/internal/utils.go"
+	mainFile := "cmd/curate/main.go"
+
+	for _, f := range []string{authFile, internalFile, mainFile} {
+		_ = engine.AddNode(graph.Node{
+			ID:       f,
+			Label:    filepath.Base(f),
+			FilePath: f,
+			Type:     graph.NodeFile,
+		})
+	}
+
+	// 2. Symbols
+	// (a) Private dead symbol -> dead_private & dead_symbols
+	deadPrivateSym := "pkg/auth/service.go:orphanPrivateHelper"
+	_ = engine.AddNode(graph.Node{
+		ID:       deadPrivateSym,
+		Label:    "orphanPrivateHelper",
+		FilePath: authFile,
+		Type:     graph.NodeSymbol,
+	})
+	_ = engine.AddEdge(graph.Edge{From: authFile, To: deadPrivateSym, Type: graph.EdgeDefines})
+
+	// (b) Exported symbol in internal/ with in_degree == 0 -> dead_exported_internal
+	deadInternalSym := "pkg/internal/utils.go:OrphanExportedHelper"
+	_ = engine.AddNode(graph.Node{
+		ID:       deadInternalSym,
+		Label:    "OrphanExportedHelper",
+		FilePath: internalFile,
+		Type:     graph.NodeSymbol,
+	})
+	_ = engine.AddEdge(graph.Edge{From: internalFile, To: deadInternalSym, Type: graph.EdgeDefines})
+
+	// (c) Exported symbol in public pkg/ with in_degree == 0 -> unreferenced_public_api
+	publicApiSym := "pkg/auth/service.go:PublicClient"
+	_ = engine.AddNode(graph.Node{
+		ID:       publicApiSym,
+		Label:    "PublicClient",
+		FilePath: authFile,
+		Type:     graph.NodeSymbol,
+	})
+	_ = engine.AddEdge(graph.Edge{From: authFile, To: publicApiSym, Type: graph.EdgeDefines})
+
+	// (d) Runtime entrypoint exclusions (main, init) -> NOT in dead_private!
+	mainSym := "cmd/curate/main.go:main"
+	_ = engine.AddNode(graph.Node{
+		ID:       mainSym,
+		Label:    "main",
+		FilePath: mainFile,
+		Type:     graph.NodeSymbol,
+	})
+	_ = engine.AddEdge(graph.Edge{From: mainFile, To: mainSym, Type: graph.EdgeDefines})
+
+	server.SetEngine(engine)
+
+	res, err := server.CurateSlice(context.Background(), CurateSliceRequest{
+		Intent:   "service authentication helper",
+		MaxFiles: 5,
+	})
+	if err != nil {
+		t.Fatalf("CurateSlice failed: %v", err)
+	}
+
+	rawBytes, err := json.Marshal(res)
+	if err != nil {
+		t.Fatalf("failed to marshal CurateSlice response: %v", err)
+	}
+
+	diag := parseDiagnosticsPayload(t, rawBytes)
+	if diag == nil {
+		t.Fatalf("missing structural_diagnostics in response")
+	}
+
+	// 1. Verify dead_private contains orphanPrivateHelper
+	assertContainsSymbol(t, diag.DeadPrivate, deadPrivateSym, "orphanPrivateHelper", "dead_private")
+
+	// 2. Verify dead_symbols is retrocompatible alias of dead_private
+	assertContainsSymbol(t, diag.DeadSymbols, deadPrivateSym, "orphanPrivateHelper", "dead_symbols")
+
+	// 3. Verify dead_exported_internal contains OrphanExportedHelper (internal/)
+	assertContainsSymbol(t, diag.DeadExportedInternal, deadInternalSym, "OrphanExportedHelper", "dead_exported_internal")
+
+	// 4. Verify unreferenced_public_api contains PublicClient (pkg/)
+	assertContainsSymbol(t, diag.UnreferencedPublicAPI, publicApiSym, "PublicClient", "unreferenced_public_api")
+
+	// 5. Verify runtime entrypoints (main) are EXCLUDED from dead_private and dead_symbols
+	assertNotContainsSymbol(t, diag.DeadPrivate, mainSym, "main", "dead_private (runtime entrypoint exclusion)")
+	assertNotContainsSymbol(t, diag.DeadSymbols, mainSym, "main", "dead_symbols (runtime entrypoint exclusion)")
 }

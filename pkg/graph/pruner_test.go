@@ -9,10 +9,10 @@ import (
 )
 
 // TestPruneSlice_Scalability validates RF-1:
-// - Pruning a synthetic slice with 3,000 nodes must complete in < 5 ms.
-// - Memory allocation must be negligible (< 5 MB).
-// - Semantic layers must be respected: Tier 1 (PrimaryFiles & Entrypoints) must be preserved
-//   when budget allows, and only pruned as a last resort when Tier 1 alone exceeds budget.
+//   - Pruning a synthetic slice with 3,000 nodes must complete in < 5 ms.
+//   - Memory allocation must be negligible (< 5 MB).
+//   - Semantic layers must be respected: Tier 1 (PrimaryFiles & Entrypoints) must be preserved
+//     when budget allows, and only pruned as a last resort when Tier 1 alone exceeds budget.
 func TestPruneSlice_Scalability(t *testing.T) {
 	primaryFiles := []string{
 		"pkg/service/auth.go",
@@ -104,15 +104,15 @@ func TestPruneSlice_Scalability(t *testing.T) {
 
 // TestAdaptiveBudgetAndPagination validates RF-2:
 // - Dynamic budget selection according to max(files_tier, symbols_tier):
-//     * (0, 0) -> 1000
-//     * (99, 499) -> 1000
-//     * (100, 10) -> 2000
-//     * (20, 6000) -> 3500
-//     * (1000, 5000) -> 2000
-//     * Explicit max_tokens > 0 always prevails.
-// - Pagination metadata: has_more, total_matching_files, total_matching_symbols,
-//   truncated_symbols_count, offset_files, next_offset_files.
-// - offset_files < 0 returns ErrInvalidOffset.
+//   - (0, 0) -> 1000
+//   - (99, 499) -> 1000
+//   - (100, 10) -> 2000
+//   - (20, 6000) -> 3500
+//   - (1000, 5000) -> 2000
+//   - Explicit max_tokens > 0 always prevails.
+//   - Pagination metadata: has_more, total_matching_files, total_matching_symbols,
+//     truncated_symbols_count, offset_files, next_offset_files.
+//   - offset_files < 0 returns ErrInvalidOffset.
 func TestAdaptiveBudgetAndPagination(t *testing.T) {
 	// 1. Validate Adaptive Budget Calculation Formula
 	budgetTests := []struct {
